@@ -1,25 +1,166 @@
-# autonomy-hub
+# Lobo Builder
 
-Hub planner-led y local-first para trabajo autónomo multi-repo. El repo está pensado como control plane personal, pero con modelo de misión transversal: puede coordinar un repo, varios repos relacionados o un proyecto greenfield que todavía no existe.
+Lobo Builder es un control plane planner-led y local-first para misiones de software.
 
-## Qué incluye esta v1
+Recibe un brief, lo convierte en una misión con `Mission Spec` y `Execution Graph`, asigna ownership a perfiles fijos y ejecuta el trabajo con policies, trazabilidad y control explícito.
 
-- backend `FastAPI` con dashboard servido por la misma app
-- persistencia híbrida:
-  - config y contratos versionados en Git (`config/`, `docs/`)
-  - estado operativo en DB (`SQLite` local por default, `Postgres` remoto opcional)
-- graph central con nodos mínimos para `Product`, `Project`, `Repository`, `Environment`, `Document`, `Mission`, `Artifact`, `AgentProfile` y `CapabilityPolicy`
-- planner heurístico inicial que:
-  - clasifica la misión en `fix | feature | refactor | greenfield`
-  - genera `Mission Spec`
-  - genera `Execution Graph`
-  - aplica el gate de política `safe | delivery | prod | autopilot`
-- runner local persistido que:
-  - ejecuta tasks por DAG
-  - usa `codex exec` como runtime de agentes
-  - corre verify/release con comandos determinísticos
-  - persiste runs, command logs, branch y worktree
-- adapters v1 para filesystem/workspace local, Git, GitHub, Railway, Vercel y Firebase App Distribution
+No intenta ser otro gestor de tickets ni una caja negra de agentes. Su foco es dar una forma estable de modelar misiones, correrlas sobre repositorios reales y dejar evidencia suficiente para entender qué se decidió, qué se ejecutó y bajo qué permisos.
+
+Sitio público: [lobo-builder.vercel.app](https://lobo-builder.vercel.app)  
+Dashboard local: [http://127.0.0.1:8042](http://127.0.0.1:8042)
+
+## Qué es Lobo Builder
+
+Lobo Builder trabaja sobre misiones, no sobre prompts sueltos ni sobre un repositorio aislado. Cada misión puede reunir contexto de producto y contexto técnico en una sola unidad operable:
+
+- `brief`
+- `desired_outcome`
+- `policy`
+- `execution_controls`
+- `linked_products`
+- `linked_repositories`
+- `linked_documents`
+
+Sobre esa base, el sistema persiste:
+
+- `Mission Spec`
+- `Execution Graph`
+- artifacts asociados a la misión
+- runs, logs, errores y estado operativo
+
+## Principios
+
+- Planner-led: el planner mantiene el control global de la misión.
+- Mission-centric: la unidad de trabajo es la misión, no el repo.
+- Local-first: la ejecución corre localmente por defecto.
+- Governed execution: verify, release y deploy siguen policies explícitas.
+- Fixed profiles: la paralelización viene de repetir perfiles conocidos, no de inventar roles ad hoc.
+
+## Cómo funciona
+
+### 1. La misión entra al sistema
+
+El brief se clasifica como `fix`, `feature`, `refactor` o `greenfield`, y queda asociado a productos, repositorios y documentos relevantes.
+
+### 2. El planeamiento queda persistido
+
+Antes de ejecutar cambios, Lobo Builder escribe un `Mission Spec` con outcome, done definition, supuestos y riesgos, y arma un `Execution Graph` que define orden, dependencias y ownership.
+
+### 3. El planner coordina
+
+Los especialistas no reciben autonomía ilimitada. Cada perfil opera dentro de superficies y herramientas acotadas, mientras el planner conserva la coordinación general de la misión.
+
+### 4. El runtime ejecuta
+
+La ejecución vive en el hub:
+
+- `run`, `resume` e `interrupt` son acciones explícitas
+- el runner prepara `branch` y `worktree`
+- cada run conserva heartbeat, logs, comandos, errores y artifacts
+- los especialistas ejecutan vía `codex exec`
+- verify y release usan comandos determinísticos
+
+### 5. Las policies gobiernan el cierre
+
+Las policies no son etiquetas. Expanden permisos concretos para:
+
+- `read`
+- `write`
+- `branch`
+- `worktree`
+- `commit`
+- `push`
+- `open_pr`
+- `merge`
+- `deploy`
+- `migrate`
+
+Las policies cerradas del sistema son:
+
+- `safe`
+- `delivery`
+- `prod`
+- `autopilot`
+
+## Qué incluye
+
+### Modelo de misión
+
+- `Mission Spec`, `Execution Graph` y artifacts asociados
+- contexto transversal por producto, repositorio, documento y entorno
+- policies y execution controls como parte del contrato de la misión
+
+### Runtime operativo
+
+- runs persistidos con `branch`, `worktree` y `current_task`
+- command logs y errores guardados por misión
+- recuperación de estado para inspeccionar, pausar y retomar trabajo
+
+### Gobierno y permisos
+
+- policies cerradas con capability flags explícitos
+- verify, release y deploy gobernados por esas flags
+- merge, deploy y migraciones sólo cuando la misión lo habilita
+
+### Contexto y observabilidad
+
+- dashboard FastAPI con cola, estado y grafo
+- graph central con nodos de producto, proyecto, repositorio, entorno, documento, misión y artifact
+- descubrimiento de instrucciones repo-locales para respetar contratos existentes
+
+## Capas del sistema
+
+### Planner y perfiles
+
+El planner clasifica la misión, selecciona estrategia, define ownership y coordina el orden de ejecución. Los demás perfiles existen para tareas concretas, no para reemplazar esa autoridad.
+
+Perfiles fijos:
+
+- Planner
+- Context Mapper
+- Product/Spec
+- Architect
+- Backend Implementer
+- Frontend Implementer
+- Data/Infra Implementer
+- Verifier/Reviewer
+- Release/Deploy
+
+### Runner y ejecución
+
+El runner toma la misión planeada y la lleva al trabajo concreto sobre el repositorio resuelto, con `worktree`, `branch`, logs y recuperación de estado.
+
+### Dashboard y API
+
+La misma app expone las APIs JSON y la interfaz operativa. La landing pública explica el sistema; el dashboard opera la misión.
+
+### Integraciones y destinos
+
+Lobo Builder modela integraciones sin convertirlas en side effects implícitos. La capa actual incluye:
+
+- Filesystem local
+- Git
+- GitHub
+- Railway
+- Vercel
+- Firebase App Distribution
+
+## Arquitectura y persistencia
+
+La arquitectura separa contratos versionados, estado operativo y superficies de ejecución para que el planeamiento y el runtime hablen el mismo idioma.
+
+Versionado en Git:
+
+- `config/`
+- `docs/`
+- catálogos de policies, perfiles y templates
+- documentación de arquitectura y migraciones
+
+Persistido como estado operativo:
+
+- base de datos (`SQLite` local por defecto, `Postgres` opcional)
+- `var/` para runs y logs
+- estado de misión, tasks y artifacts
 
 ## Quick start
 
@@ -31,11 +172,11 @@ pip install -e .[dev]
 autonomy-hub
 ```
 
-La app levanta por default en [http://127.0.0.1:8042](http://127.0.0.1:8042).
+La app levanta por defecto en [http://127.0.0.1:8042](http://127.0.0.1:8042).
 
-## Sitio Astro público
+## Sitio Astro
 
-El repo ahora también incluye una landing estática en Astro bajo `apps/site`, pensada para presentar **Lobo Builder** como frente público del proyecto sin tocar el dashboard ni la API del backend actual.
+El repo incluye una landing pública en Astro bajo `apps/site`.
 
 ```bash
 cd /Users/matiasrios/Documents/GitHub/lobo-builder/apps/site
@@ -43,7 +184,7 @@ npm install
 npm run dev
 ```
 
-Checks útiles del frontend:
+Checks útiles:
 
 ```bash
 npm run check
@@ -57,21 +198,19 @@ Deploy recomendado en Vercel:
 - build command: `npm run build`
 - output directory: `dist`
 
-La app FastAPI y sus rutas `/api/*` siguen viviendo aparte en el root del proyecto.
-
 ## Variables útiles
 
 - `AUTONOMY_DATABASE_URL`
-  - default local: `sqlite+pysqlite:///.../autonomy-hub/var/autonomy-hub.db`
-  - remoto: usar el Postgres reutilizado desde Railway cuando quieras persistencia compartida
+  - local: `sqlite+pysqlite:///.../autonomy-hub/var/autonomy-hub.db`
+  - remoto: `Postgres` cuando se quiera persistencia compartida
 - `AUTONOMY_WORKSPACE_ROOT`
   - root para autodiscovery de repos locales
 - `AUTONOMY_AUTO_DISCOVER_LOCAL`
-  - `true` por default
+  - `true` por defecto
 - `AUTONOMY_DISCOVER_MAX_DEPTH`
   - profundidad máxima de scan local
 - `AUTONOMY_DISCORD_WEBHOOK_URL`
-  - webhook de Discord para avisar cuando un run termina en `completed`, `failed` o `interrupted`
+  - webhook para notificar runs `completed`, `failed` o `interrupted`
 
 ## API principal
 
@@ -104,27 +243,28 @@ curl -X POST http://127.0.0.1:8042/api/missions \
   }'
 ```
 
-## Layout
+## Layout del repo
 
 - `src/autonomy_hub/main.py`
-  app factory + dashboard
+  - app factory y dashboard
 - `src/autonomy_hub/services/planner.py`
-  misión -> spec + execution graph
+  - misión -> spec + execution graph
 - `src/autonomy_hub/services/graph.py`
-  graph central + autodiscovery local
+  - graph central + autodiscovery local
 - `src/autonomy_hub/services/missions.py`
-  persistencia y vistas operativas
+  - persistencia y vistas operativas
+- `src/autonomy_hub/services/runner.py`
+  - ejecución de runs y control del runtime
 - `config/`
-  perfiles, policies, intake greenfield y template catalog
+  - perfiles, policies, intake greenfield y template catalog
 - `docs/architecture.md`
-  decisiones de arquitectura
-- `docs/spec-forge-audit.md`
-  qué absorber de `../spec-forge`
-- `docs/railway-reuse.md`
-  plan para reutilizar y renombrar el proyecto Railway existente
+  - decisiones de arquitectura
+- `docs/`
+  - contratos, planes y referencias del sistema
 
-## Estado actual
+## Para seguir
 
-Esta base ya materializa el modelo central de misión y también un runner local real para el slice `autopilot` inicial. Hoy el hub puede persistir runs, crear worktrees/branches, ejecutar perfiles vía `codex exec`, correr verify, mergear localmente a `main` y disparar Android Firebase App Distribution cuando el proyecto resuelve ese target.
-
-Todavía faltan paralelismo real multi-repo, runners remotos, migraciones DB formales y soporte de más targets de release, pero el sistema ya dejó de ser sólo un planner/control plane.
+- [Repositorio](https://github.com/MatiasJRB/lobo-builder)
+- [Arquitectura](https://github.com/MatiasJRB/lobo-builder/blob/main/docs/architecture.md)
+- [Quick start](https://github.com/MatiasJRB/lobo-builder#quick-start)
+- [Landing pública](https://lobo-builder.vercel.app)

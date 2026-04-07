@@ -43,7 +43,7 @@ export const siteContent = {
     {
       value: "6",
       label: "adapters v1",
-      description: "Filesystem local, Git, GitHub, Railway, Vercel y Firebase App Distribution ya están modelados.",
+      description: "Filesystem local, Git, GitHub, Railway, Vercel y Firebase App Distribution forman parte de la capa de integración.",
     },
   ],
   workflow: [
@@ -165,13 +165,13 @@ export const siteContent = {
     },
     {
       title: "README",
-      description: "Quick start, variables útiles, API principal y layout actual del repo.",
+      description: "Quick start, variables útiles, API principal y layout del repo.",
       href: `${repoBase}#readme`,
       label: "Ver README",
     },
     {
       title: "Arquitectura",
-      description: "Modelo de misión, grafo, policies y forma del runtime actual.",
+      description: "Modelo de misión, grafo, policies y forma del runtime.",
       href: `${repoBase}/blob/main/docs/architecture.md`,
       label: "Leer arquitectura",
     },
@@ -192,7 +192,7 @@ export const siteContent = {
     {
       title: "API de control",
       description:
-        "El control plane actual se opera por endpoints concretos; la landing sólo explica el sistema.",
+        "El control plane se opera por endpoints concretos; la landing sólo explica el sistema.",
       value: "GET /api/dashboard · POST /api/missions · /run · /resume · /interrupt",
     },
   ],
