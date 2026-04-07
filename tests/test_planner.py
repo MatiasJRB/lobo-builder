@@ -125,6 +125,60 @@ Need schema updates, API work, and a frontend flow for onboarding.
     assert any(artifact.kind == "planning_context" for artifact in result.artifacts)
 
 
+def test_backend_only_mission_scope_does_not_expand_frontend_work_units(tmp_path: Path):
+    repo = tmp_path / "mango-cobros"
+    docs_dir = repo / "specs" / "001-cobros-mvp-phase1"
+    docs_dir.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "api").mkdir()
+    (repo / "web").mkdir()
+    (docs_dir / "tasks.md").write_text(
+        """
+# Tasks
+
+- backend API work
+- frontend UI work
+- infra work
+        """.strip(),
+        encoding="utf-8",
+    )
+    (docs_dir / "spec.md").write_text(
+        """
+# Spec
+
+This product has backend endpoints and frontend screens.
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    catalog = load_catalog(CONFIG_DIR)
+    planner = PlannerService(catalog, settings=build_settings(tmp_path))
+    mission = MissionCreateRequest(
+        brief="Completar el slice backend de cobros STP con webhook y endpoints API.",
+        desired_outcome="Validar el flujo backend con tests backend y cerrar en PR a main.",
+        linked_repositories=["mango-cobros"],
+        linked_products=["mango-cobros"],
+        linked_documents=[
+            str(docs_dir / "tasks.md"),
+            str(docs_dir / "spec.md"),
+        ],
+        policy="safe",
+    )
+
+    planned = planner.plan(mission)
+    proposal = planner.build_decomposition_proposal(
+        mission,
+        mission_type=planned.mission_type,
+        spec=planned.spec,
+        planning_context=planned.planning_context,
+    )
+
+    surfaces = {unit.primary_surface for unit in proposal.work_units}
+
+    assert "backend" in surfaces
+    assert "frontend" not in surfaces
+
+
 def test_planner_honors_explicit_execution_controls_and_deploy_task_dependencies():
     catalog = load_catalog(CONFIG_DIR)
     planner = PlannerService(catalog)

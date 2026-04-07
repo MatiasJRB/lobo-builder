@@ -4,7 +4,11 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from subprocess import run as subprocess_run
 from threading import Lock, Thread, current_thread
+from urllib.error import HTTPError
+from urllib.parse import quote, unquote, urlparse
+from urllib.request import Request, urlopen
 from typing import Optional
 
 from sqlalchemy import select
@@ -264,7 +268,7 @@ class RunnerService:
 
         if task.key == "architect-plan":
             self._run_architect(mission, task, project, run_id)
-        elif task.key == "planner-expand-wave-1":
+        elif self._is_planner_expand_task(task):
             self._run_planner_expand(mission, task, run_id)
         elif task.key.startswith("implement-"):
             self._run_implementer(mission, task, project, run_id)
@@ -278,6 +282,12 @@ class RunnerService:
             raise MissionExecutionError(f"Runner does not know how to execute task '{task.key}'.")
 
         self._set_task_status(mission_id, task.key, "completed")
+
+    @staticmethod
+    def _is_planner_expand_task(task: ExecutionTaskSpec) -> bool:
+        if task.key.startswith("planner-expand-wave"):
+            return True
+        return task.agent_profile_slug == "planner" and task.surface == "planning"
 
     def _run_architect(
         self,
@@ -532,20 +542,7 @@ class RunnerService:
     ) -> None:
         run = self._require_run(run_id)
         if mission.policy.slug == "safe":
-            self._create_artifact(
-                mission.id,
-                ArtifactPayload(
-                    kind="pull_request",
-                    title="Safe Policy Release Gate",
-                    body=(
-                        f"Mission policy '{mission.policy.slug}' keeps merge and deploy disabled.\n"
-                        f"Branch '{run.branch_name}' remains isolated in worktree '{run.worktree_path}'.\n"
-                        "The branch is ready for manual review, push, or PR handling outside runner v1."
-                    ),
-                    repo_scope=[project.repository],
-                    metadata={"task_key": task.key, "policy": mission.policy.slug, "branch_name": run.branch_name},
-                ),
-            )
+            self._run_safe_release_handoff(mission, task, project, run_id, run)
             return
         merge_target = run.merge_target or project.default_branch
         release_repo = project.repo_path
@@ -629,6 +626,369 @@ class RunnerService:
                 metadata={"task_key": task.key, "merge_target": merge_target, "branch_name": run.branch_name},
             ),
         )
+
+    def _run_safe_release_handoff(
+        self,
+        mission: MissionView,
+        task: ExecutionTaskSpec,
+        project: ResolvedProjectContext,
+        run_id: str,
+        run: MissionRunView,
+    ) -> None:
+        release_repo = Path(run.worktree_path or project.repo_path)
+        branch_name = run.branch_name
+        if not branch_name:
+            raise MissionExecutionError("Safe policy release requires an execution branch to prepare the PR handoff.")
+
+        remote = primary_remote(str(release_repo))
+        if not remote:
+            self._create_safe_release_gate_artifact(
+                mission=mission,
+                task=task,
+                project=project,
+                run=run,
+                reason="No git remote was configured for this repository, so the PR handoff stays manual.",
+            )
+            return
+
+        if mission.policy.can_push:
+            push = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task.key,
+                "git",
+                f"git push -u {remote} {branch_name}",
+                cwd=release_repo,
+            )
+            if push.exit_code != 0:
+                self._create_safe_release_gate_artifact(
+                    mission=mission,
+                    task=task,
+                    project=project,
+                    run=run,
+                    reason=(
+                        f"Branch push to '{remote}' could not be completed automatically. "
+                        f"Runner output: {push.summary or 'no summary available'}"
+                    ),
+                )
+                return
+
+        if not mission.policy.can_open_pr:
+            self._create_safe_release_gate_artifact(
+                mission=mission,
+                task=task,
+                project=project,
+                run=run,
+                reason="Mission policy does not allow opening a pull request automatically.",
+            )
+            return
+
+        merge_target = run.merge_target or project.default_branch
+        pr = self._create_or_find_safe_pull_request(
+            mission=mission,
+            project=project,
+            release_repo=release_repo,
+            branch_name=branch_name,
+            merge_target=merge_target,
+        )
+        self._create_artifact(
+            mission.id,
+            ArtifactPayload(
+                kind="pull_request",
+                title="Safe Policy Pull Request",
+                body=(
+                    f"Pull request opened against `{merge_target}`.\n"
+                    f"URL: {pr['url']}\n"
+                    f"Branch: {branch_name}\n"
+                    f"Repository: {pr['repository']}"
+                ),
+                repo_scope=[project.repository],
+                uri=pr["url"],
+                metadata={
+                    "task_key": task.key,
+                    "policy": mission.policy.slug,
+                    "branch_name": branch_name,
+                    "merge_target": merge_target,
+                    "pr_number": pr["number"],
+                    "repository": pr["repository"],
+                },
+            ),
+        )
+
+    def _create_safe_release_gate_artifact(
+        self,
+        *,
+        mission: MissionView,
+        task: ExecutionTaskSpec,
+        project: ResolvedProjectContext,
+        run: MissionRunView,
+        reason: str,
+    ) -> None:
+        self._create_artifact(
+            mission.id,
+            ArtifactPayload(
+                kind="pull_request",
+                title="Safe Policy Release Gate",
+                body=(
+                    f"Mission policy '{mission.policy.slug}' keeps merge and deploy disabled.\n"
+                    f"Branch '{run.branch_name}' remains isolated in worktree '{run.worktree_path}'.\n"
+                    f"{reason}"
+                ),
+                repo_scope=[project.repository],
+                metadata={"task_key": task.key, "policy": mission.policy.slug, "branch_name": run.branch_name},
+            ),
+        )
+
+        review_request = self._request_copilot_review(
+            release_repo=release_repo,
+            repository=pr["repository"],
+            pr_number=pr["number"],
+        )
+        self._create_artifact(
+            mission.id,
+            ArtifactPayload(
+                kind="review_request",
+                title="Copilot Review Request",
+                body=review_request["message"],
+                repo_scope=[project.repository],
+                uri=pr["url"],
+                metadata={
+                    "task_key": task.key,
+                    "policy": mission.policy.slug,
+                    "branch_name": branch_name,
+                    "merge_target": merge_target,
+                    "pr_number": pr["number"],
+                    "repository": pr["repository"],
+                    "status": review_request["status"],
+                    "reviewer": review_request["reviewer"],
+                },
+            ),
+        )
+
+    def _create_or_find_safe_pull_request(
+        self,
+        *,
+        mission: MissionView,
+        project: ResolvedProjectContext,
+        release_repo: Path,
+        branch_name: str,
+        merge_target: str,
+    ) -> dict[str, object]:
+        remote = primary_remote(str(release_repo))
+        if not remote:
+            raise MissionExecutionError("Could not determine the remote used for the safe release handoff.")
+
+        remote_url = self._git_remote_url(release_repo, remote)
+        owner, repo = self._parse_github_repository(remote_url)
+        token = self._github_api_token(remote_url)
+        existing = self._find_pull_request(owner=owner, repo=repo, branch_name=branch_name, merge_target=merge_target, token=token)
+        if existing:
+            return existing
+
+        title = self._safe_pull_request_title(mission)
+        body = self._safe_pull_request_body(mission, project=project, branch_name=branch_name, merge_target=merge_target)
+        payload = {
+            "title": title,
+            "head": branch_name,
+            "base": merge_target,
+            "body": body,
+            "draft": False,
+        }
+        response = self._github_api_request(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            token=token,
+            method="POST",
+            payload=payload,
+        )
+        return {
+            "number": response["number"],
+            "url": response["html_url"],
+            "repository": response["base"]["repo"]["full_name"],
+        }
+
+    def _request_copilot_review(self, *, release_repo: Path, repository: str, pr_number: int) -> dict[str, str]:
+        remote = primary_remote(str(release_repo))
+        if not remote:
+            return {
+                "status": "skipped",
+                "reviewer": "Copilot",
+                "message": "Copilot review request skipped because no git remote was available.",
+            }
+
+        remote_url = self._git_remote_url(release_repo, remote)
+        owner, repo = self._parse_github_repository(remote_url)
+        token = self._github_api_token(remote_url)
+        try:
+            self._github_api_request(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+                token=token,
+                method="POST",
+                payload={"reviewers": ["copilot-pull-request-reviewer[bot]"]},
+            )
+        except MissionExecutionError as exc:
+            return {
+                "status": "failed",
+                "reviewer": "Copilot",
+                "message": f"Copilot review request could not be completed automatically: {exc}",
+            }
+
+        return {
+            "status": "requested",
+            "reviewer": "Copilot",
+            "message": f"Copilot review requested on PR #{pr_number} in {repository}.",
+        }
+
+    def _find_pull_request(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        branch_name: str,
+        merge_target: str,
+        token: str,
+    ) -> dict[str, object] | None:
+        query = quote(f"{owner}:{branch_name}", safe=":")
+        response = self._github_api_request(
+            (
+                f"https://api.github.com/repos/{owner}/{repo}/pulls"
+                f"?state=open&head={query}&base={quote(merge_target, safe='')}"
+            ),
+            token=token,
+        )
+        if not response:
+            return None
+        pull = response[0]
+        return {
+            "number": pull["number"],
+            "url": pull["html_url"],
+            "repository": pull["base"]["repo"]["full_name"],
+        }
+
+    def _safe_pull_request_title(self, mission: MissionView) -> str:
+        title = mission.brief.strip()
+        return title if len(title) <= 120 else f"{title[:117].rstrip()}..."
+
+    def _safe_pull_request_body(
+        self,
+        mission: MissionView,
+        *,
+        project: ResolvedProjectContext,
+        branch_name: str,
+        merge_target: str,
+    ) -> str:
+        lines = [
+            "## Mission",
+            f"- Summary: {mission.brief}",
+            f"- Desired outcome: {mission.desired_outcome or 'n/a'}",
+            f"- Scope: {project.repository}",
+            "",
+            "## Branch Handoff",
+            f"- Head: `{branch_name}`",
+            f"- Base: `{merge_target}`",
+            f"- Policy: `{mission.policy.slug}`",
+        ]
+
+        diff_summaries = [artifact for artifact in mission.artifacts if artifact.kind == "diff_summary"]
+        if diff_summaries:
+            lines.extend(["", "## Included Changes"])
+            for artifact in diff_summaries:
+                title = artifact.title.replace("Diff Summary · ", "")
+                lines.append(f"- {title}")
+
+        verification = next((artifact for artifact in reversed(mission.artifacts) if artifact.kind == "verification_report"), None)
+        if verification:
+            lines.extend(["", "## Verification", verification.body])
+
+        lines.extend(
+            [
+                "",
+                "## Notes",
+                "- This PR was opened by the safe-policy release handoff.",
+                "- Review/merge remain outside the mission runner.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _git_remote_url(self, repo_path: Path, remote: str) -> str:
+        completed = subprocess_run(
+            ["git", "-C", str(repo_path), "remote", "get-url", remote],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        remote_url = completed.stdout.strip()
+        if completed.returncode != 0 or not remote_url:
+            raise MissionExecutionError(f"Could not resolve git remote URL for '{remote}'.")
+        return remote_url
+
+    def _parse_github_repository(self, remote_url: str) -> tuple[str, str]:
+        owner_repo: str | None = None
+        if remote_url.startswith("git@"):
+            try:
+                host_part, owner_repo = remote_url.split(":", 1)
+            except ValueError as exc:
+                raise MissionExecutionError(f"Unsupported git remote format: {remote_url}") from exc
+            host = host_part.split("@", 1)[1]
+        else:
+            parsed = urlparse(remote_url)
+            host = parsed.hostname or ""
+            owner_repo = parsed.path.lstrip("/")
+
+        if host != "github.com":
+            raise MissionExecutionError(f"Safe release PR creation currently supports github.com remotes only; got '{host}'.")
+
+        owner_repo = owner_repo.removesuffix(".git")
+        if owner_repo.count("/") < 1:
+            raise MissionExecutionError(f"Could not parse owner/repository from remote '{remote_url}'.")
+        owner, repo = owner_repo.split("/", 1)
+        return owner, repo
+
+    def _github_api_token(self, remote_url: str) -> str:
+        parsed = urlparse(remote_url)
+        if parsed.scheme in {"http", "https"} and parsed.username:
+            return unquote(parsed.username)
+
+        gh = subprocess_run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+        token = gh.stdout.strip()
+        if gh.returncode == 0 and token:
+            return token
+
+        raise MissionExecutionError(
+            "Could not resolve a GitHub token for safe-policy PR creation. "
+            "Use an HTTPS remote with a token or authenticate gh."
+        )
+
+    def _github_api_request(
+        self,
+        url: str,
+        *,
+        token: str,
+        method: str = "GET",
+        payload: dict[str, object] | None = None,
+    ):
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "lobo-builder-runner",
+                "Content-Type": "application/json",
+            },
+            method=method,
+        )
+        try:
+            with urlopen(request) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8")
+            try:
+                message = json.loads(details).get("message", details)
+            except json.JSONDecodeError:
+                message = details or str(exc)
+            raise MissionExecutionError(f"GitHub API {method} {url} failed: {message}") from exc
 
     def _run_deploy(
         self,

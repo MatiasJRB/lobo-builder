@@ -22,7 +22,7 @@ from autonomy_hub.services.graph import GraphService
 from autonomy_hub.services.missions import MissionService
 from autonomy_hub.services.planner import PlannerService
 from autonomy_hub.services.project_context import ProjectContextResolver
-from autonomy_hub.services.runner import RunnerService, RuntimeBudgetExceeded
+from autonomy_hub.services.runner import MissionExecutionError, RunnerService, RuntimeBudgetExceeded
 from autonomy_hub.domain.models import MissionCreateRequest, ProjectInstructionHints, ProjectManifest
 
 
@@ -229,6 +229,14 @@ Prefer reusable UI patterns and documented task flows.
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
     return repo
+
+
+def attach_bare_remote(tmp_path: Path, repo: Path) -> Path:
+    remote = tmp_path / f"{repo.name}-origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo, check=True)
+    return remote
 
 
 def wait_for_run(runner_service: RunnerService, mission_id: str, *, timeout_seconds: float = 20.0):
@@ -524,6 +532,57 @@ Touch schema, API, and UI for a single onboarding flow.
     assert all(call["model"] for call in runner_service.codex_adapter.prompts)
 
 
+def test_runner_accepts_renamed_planner_expand_tasks(tmp_path: Path):
+    repo = init_instruction_repo(tmp_path, name="adaptive-repo-renamed")
+    docs_dir = tmp_path / "mission-docs-renamed"
+    docs_dir.mkdir(parents=True)
+    (docs_dir / "scope.md").write_text(
+        """
+# Signup Slice
+
+Touch schema, API, and UI for a single onboarding flow.
+        """.strip(),
+        encoding="utf-8",
+    )
+    _, mission_service, runner_service = build_services(tmp_path)
+
+    mission = mission_service.create_mission(
+        MissionCreateRequest(
+            brief="Implement signup across schema, API, and UI.",
+            mission_type="feature",
+            linked_repositories=[repo.name],
+            linked_products=["Adaptive"],
+            linked_documents=[str(docs_dir)],
+            policy="safe",
+        )
+    )
+
+    with runner_service.session_factory() as session:
+        planner_expand = session.execute(
+            select(ExecutionTaskRecord).where(
+                ExecutionTaskRecord.mission_id == mission.id,
+                ExecutionTaskRecord.task_key == "planner-expand-wave-1",
+            )
+        ).scalar_one()
+        planner_expand.task_key = "planner-expand-wave-2"
+        verify = session.execute(
+            select(ExecutionTaskRecord).where(
+                ExecutionTaskRecord.mission_id == mission.id,
+                ExecutionTaskRecord.task_key == "verify",
+            )
+        ).scalar_one()
+        verify.depends_on = ["planner-expand-wave-2"]
+        session.commit()
+
+    runner_service.start_run(mission.id)
+    run = wait_for_run(runner_service, mission.id)
+    mission_view = mission_service.get_mission(mission.id)
+
+    assert run.status == "completed"
+    assert any(task.key == "planner-expand-wave-2" and task.status == "completed" for task in mission_view.execution_tasks)
+    assert any(artifact.kind == "decomposition_proposal" for artifact in mission_view.artifacts)
+
+
 def test_runtime_budget_stop_interrupts_run_and_blocks_resume(tmp_path: Path):
     init_instruction_repo(tmp_path, name="budgeted-repo")
     _, mission_service, runner_service = build_services(tmp_path)
@@ -585,9 +644,29 @@ def test_runtime_budget_stop_interrupts_run_and_blocks_resume(tmp_path: Path):
         raise AssertionError("Expected resume to be blocked when runtime budget is exhausted.")
 
 
-def test_safe_policy_release_does_not_merge_main(tmp_path: Path):
+def test_safe_policy_release_does_not_merge_main(tmp_path: Path, monkeypatch):
     repo = init_instruction_repo(tmp_path, name="safe-release-repo")
+    remote = attach_bare_remote(tmp_path, repo)
     _, mission_service, runner_service = build_services(tmp_path)
+
+    monkeypatch.setattr(
+        runner_service,
+        "_create_or_find_safe_pull_request",
+        lambda **_: {
+            "number": 42,
+            "url": "https://github.com/acme/safe-release-repo/pull/42",
+            "repository": "acme/safe-release-repo",
+        },
+    )
+    monkeypatch.setattr(
+        runner_service,
+        "_request_copilot_review",
+        lambda **_: {
+            "status": "requested",
+            "reviewer": "Copilot",
+            "message": "Copilot review requested on PR #42 in acme/safe-release-repo.",
+        },
+    )
 
     mission = mission_service.create_mission(
         MissionCreateRequest(
@@ -612,7 +691,47 @@ def test_safe_policy_release_does_not_merge_main(tmp_path: Path):
 
     assert run.status == "completed"
     assert "Autopilot merge" not in merge_log.stdout
-    assert any(artifact.kind == "pull_request" for artifact in mission_view.artifacts)
+    pull_request = next(artifact for artifact in mission_view.artifacts if artifact.kind == "pull_request")
+    review_request = next(artifact for artifact in mission_view.artifacts if artifact.kind == "review_request")
+    remote_branch = subprocess.run(
+        ["git", "--git-dir", str(remote), "show-ref", "--verify", f"refs/heads/{run.branch_name}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert pull_request.uri == "https://github.com/acme/safe-release-repo/pull/42"
+    assert review_request.metadata["status"] == "requested"
+    assert remote_branch.returncode == 0
+
+
+def test_safe_policy_release_fails_when_pull_request_cannot_be_created(tmp_path: Path, monkeypatch):
+    repo = init_instruction_repo(tmp_path, name="safe-release-pr-fail")
+    attach_bare_remote(tmp_path, repo)
+    _, mission_service, runner_service = build_services(tmp_path)
+
+    def fail_pr(**_):
+        raise MissionExecutionError("PR creation failed")
+
+    monkeypatch.setattr(runner_service, "_create_or_find_safe_pull_request", fail_pr)
+
+    mission = mission_service.create_mission(
+        MissionCreateRequest(
+            brief="Fail safe release if the PR handoff cannot be created.",
+            mission_type="feature",
+            linked_repositories=[repo.name],
+            linked_products=["Lobo Builder"],
+            policy="safe",
+        )
+    )
+
+    runner_service.start_run(mission.id)
+    run = wait_for_run(runner_service, mission.id)
+    mission_view = mission_service.get_mission(mission.id)
+
+    assert run.status == "failed"
+    assert mission_view.status == "failed"
+    assert not any(artifact.kind == "pull_request" and artifact.uri for artifact in mission_view.artifacts)
 
 
 def test_legacy_mission_without_explicit_deploy_task_keeps_deploy_inside_release(tmp_path: Path):

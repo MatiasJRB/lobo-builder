@@ -775,6 +775,7 @@ class PlannerService:
 
         signals = planning_context.mission_signals
         work_units: list[WorkUnit] = []
+        allowed_surfaces = self._allowed_surfaces_from_mission_scope(mission)
 
         if len(repo_names) > 1:
             data_repo_ids: list[str] = []
@@ -799,9 +800,15 @@ class PlannerService:
                     data_repo_ids.append(unit_id)
         else:
             repo_name = repo_names[0]
-            needs_frontend = "frontend" in signals or dominant_surface == "frontend"
-            needs_backend = "backend" in signals or dominant_surface == "backend"
-            needs_data = "data-infra" in signals
+            needs_frontend = ("frontend" in signals or dominant_surface == "frontend") and (
+                allowed_surfaces is None or "frontend" in allowed_surfaces
+            )
+            needs_backend = ("backend" in signals or dominant_surface == "backend") and (
+                allowed_surfaces is None or "backend" in allowed_surfaces
+            )
+            needs_data = ("data-infra" in signals) and (
+                allowed_surfaces is None or "data-infra" in allowed_surfaces
+            )
 
             if needs_data and (needs_backend or needs_frontend):
                 work_units.append(
@@ -846,13 +853,20 @@ class PlannerService:
                 )
 
             if not work_units:
+                fallback_surface = dominant_surface
+                if allowed_surfaces and fallback_surface not in allowed_surfaces:
+                    fallback_surface = (
+                        "backend"
+                        if "backend" in allowed_surfaces
+                        else ("frontend" if "frontend" in allowed_surfaces else next(iter(allowed_surfaces)))
+                    )
                 work_units.append(
                     self._work_unit(
                         unit_id=slugify(repo_name),
                         title=f"Implement owned changes for {repo_name}",
-                        profile_slug=self._profile_for_surface(dominant_surface),
+                        profile_slug=self._profile_for_surface(fallback_surface),
                         repo_scope=[repo_name],
-                        surface=dominant_surface,
+                        surface=fallback_surface,
                         outcome="Finish the bounded mission slice in one cohesive task.",
                         rationale="The mission is small enough that further splitting would add overhead with little gain.",
                     )
@@ -886,6 +900,21 @@ class PlannerService:
             conservative_mode=conservative_mode,
             unresolved_questions=unresolved_questions,
         )
+
+    def _allowed_surfaces_from_mission_scope(self, mission: MissionCreateRequest) -> set[str] | None:
+        haystack = f"{mission.brief} {mission.desired_outcome or ''}".lower()
+        explicit_frontend_hints = tuple(token for token in FRONTEND_HINTS + MOBILE_HINTS if token != "web")
+        mentions_frontend = any(token in haystack for token in explicit_frontend_hints)
+        mentions_backend = any(token in haystack for token in BACKEND_HINTS)
+        mentions_data = any(token in haystack for token in DATA_HINTS)
+
+        if mentions_backend and not mentions_frontend:
+            return {"backend", "data-infra"}
+        if mentions_frontend and not mentions_backend and not mentions_data:
+            return {"frontend"}
+        if mentions_data and not mentions_frontend and not mentions_backend:
+            return {"data-infra"}
+        return None
 
     def implementation_tasks_from_proposal(
         self,
