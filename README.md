@@ -145,6 +145,74 @@ Lobo Builder modela integraciones sin convertirlas en side effects implícitos. 
 - Vercel
 - Firebase App Distribution
 
+## Arquitectura agentic/IA
+
+La parte agentic del sistema no está pensada como un enjambre abierto de agentes. Está modelada como una arquitectura con control central, perfiles versionados y límites explícitos de ejecución.
+
+### Planner como autoridad
+
+El `Planner` es el único dueño del grafo y de la cola de trabajo. Su responsabilidad es:
+
+- clasificar la misión
+- generar `Mission Spec`
+- generar `Execution Graph`
+- decidir ownership y secuencia
+- mantener el control global durante toda la ejecución
+
+Los especialistas no reescriben libremente el plan. Ejecutan tareas acotadas dentro de ese marco.
+
+### Catálogo fijo de perfiles
+
+Los agentes no se inventan en runtime. El sistema usa un catálogo versionado en `config/agent_profiles/catalog.yaml`, donde cada perfil declara:
+
+- `role`
+- `accepted_inputs`
+- `required_outputs`
+- `allowed_tools`
+- `owned_surfaces`
+- `max_repo_scope`
+- `can_parallelize`
+- `model`
+- `reasoning_effort`
+
+Eso vuelve explícita la relación entre misión, tipo de tarea, superficie de código y capacidad del agente que la toma.
+
+### Ejecución agentic materializada en runtime
+
+La ejecución de especialistas usa `codex exec`. El runner materializa la tarea dentro de un contexto operativo concreto:
+
+- repositorio resuelto
+- `branch`
+- `worktree`
+- policy activa
+- artifacts previos
+- logs y heartbeat del run
+
+El resultado no es sólo texto generado por un modelo. Queda asociado a una misión persistida, con artifacts, comandos ejecutados y estado recuperable.
+
+### Policies como gates duros
+
+La capa de IA no decide por sí sola hasta dónde avanzar. Las `MissionPolicy` actúan como gates duros para:
+
+- escritura
+- push
+- apertura de PR
+- merge
+- deploy
+- migraciones
+
+Esto evita que la parte agentic quede desacoplada del modelo de gobierno.
+
+### Diseño model-aware
+
+El catálogo de perfiles ya permite definir modelo y nivel de razonamiento por función. La dirección técnica del repo es que el planner use esa información para cortar trabajo de forma coherente con la capacidad real del runtime y no con heurísticas genéricas.
+
+En esa línea, el plan de evolución más importante es pasar a un planner adaptativo por olas:
+
+- primero se fija el DAG macro
+- después se expande la implementación con contexto técnico real
+- el sizing de tasks se ajusta por repo, superficie, dependencias y perfil
+
 ## Arquitectura y persistencia
 
 La arquitectura separa contratos versionados, estado operativo y superficies de ejecución para que el planeamiento y el runtime hablen el mismo idioma.
@@ -262,9 +330,17 @@ curl -X POST http://127.0.0.1:8042/api/missions \
 - `docs/`
   - contratos, planes y referencias del sistema
 
+## Documentación técnica
+
+- [Arquitectura del sistema](docs/architecture.md)
+- [Catálogo de perfiles agentic](config/agent_profiles/catalog.yaml)
+- [Plan de planner adaptativo por olas](docs/plans/adaptive-planner-gpt54.md)
+- [Plan de misiones multi-repo](docs/plans/multi-repo-missions-v1.md)
+- [Auditoría de `spec-forge`](docs/spec-forge-audit.md)
+- [Plan de reutilización de Railway](docs/railway-reuse.md)
+
 ## Para seguir
 
 - [Repositorio](https://github.com/MatiasJRB/lobo-builder)
-- [Arquitectura](https://github.com/MatiasJRB/lobo-builder/blob/main/docs/architecture.md)
 - [Quick start](https://github.com/MatiasJRB/lobo-builder#quick-start)
 - [Landing pública](https://lobo-builder.vercel.app)
