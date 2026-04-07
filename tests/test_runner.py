@@ -1,5 +1,6 @@
 import subprocess
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import select
@@ -7,7 +8,15 @@ from sqlalchemy import select
 from autonomy_hub.adapters.codex_exec import CodexExecResult
 from autonomy_hub.adapters.command_runner import CommandResult, LocalCommandRunner
 from autonomy_hub.config import Settings
-from autonomy_hub.db import ExecutionTaskRecord, MissionRecord, MissionRunRecord, build_session_factory, utcnow
+from autonomy_hub.db import (
+    ArtifactRecord,
+    CommandExecutionRecord,
+    ExecutionTaskRecord,
+    MissionRecord,
+    MissionRunRecord,
+    build_session_factory,
+    utcnow,
+)
 from autonomy_hub.services.config_loader import load_catalog
 from autonomy_hub.services.graph import GraphService
 from autonomy_hub.services.missions import MissionService
@@ -51,7 +60,7 @@ class HybridCommandRunner(LocalCommandRunner):
         self.fail_on_firebase = fail_on_firebase
 
     def run(self, *, run_key, command, cwd, log_path, env=None):
-        if "npx expo prebuild --platform android --clean --no-install" in command:
+        if "expo prebuild --platform android --clean --no-install" in command:
             return self._fake(command, cwd, log_path, 0, "expo prebuild ok")
         if "./gradlew assembleRelease --no-daemon" in command:
             apk_path = Path(cwd) / "app" / "build" / "outputs" / "apk" / "release" / "app-release.apk"
@@ -219,6 +228,71 @@ def test_runner_executes_autopilot_mission_end_to_end(tmp_path: Path):
     assert any(artifact.kind == "release_note" for artifact in mission_view.artifacts)
 
 
+def test_clean_worktree_snapshot_surfaces_last_committed_batch(tmp_path: Path):
+    init_asiento_repo(tmp_path)
+    _, mission_service, runner_service = build_services(tmp_path)
+
+    mission = mission_service.create_mission(
+        MissionCreateRequest(
+            brief="Refactor visual end-to-end para unificar screens y componentes mobile.",
+            desired_outcome="Ship final Android build through Firebase and close in main.",
+            mission_type="refactor",
+            linked_repositories=["asiento-libre"],
+            linked_products=["Asiento Libre"],
+            policy="autopilot",
+            merge_target="main",
+            deploy_targets=["android-firebase-app-distribution"],
+        )
+    )
+
+    runner_service.start_run(mission.id)
+    run = wait_for_run(runner_service, mission.id)
+    mission_view = mission_service.get_mission(mission.id)
+    snapshot = mission_view.worktree_snapshot
+    committed_artifacts = [
+        artifact for artifact in mission_view.artifacts if artifact.kind == "diff_summary" and artifact.metadata.get("commit_sha")
+    ]
+
+    assert run.status == "completed"
+    assert snapshot is not None
+    assert snapshot.has_changes is False
+    assert snapshot.dirty_files_count == 0
+    assert snapshot.last_committed_batch is not None
+    assert snapshot.last_committed_batch.commit_sha
+    assert snapshot.last_committed_batch.commit_subject
+    assert snapshot.last_committed_batch.files_count >= 1
+    assert snapshot.last_committed_batch.changed_files
+    assert "ultimo batch ya fue commiteado" in (snapshot.note or "").lower()
+    assert committed_artifacts
+    assert committed_artifacts[-1].metadata["files_changed"] >= 1
+    assert committed_artifacts[-1].metadata["changed_files"]
+
+
+def test_release_prebuild_command_becomes_non_interactive_and_version_pinned(tmp_path: Path):
+    repo = init_asiento_repo(tmp_path)
+    (repo / "package-lock.json").write_text(
+        """
+{
+  "name": "asiento-libre",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "asiento-libre" },
+    "node_modules/expo": { "version": "54.0.22" }
+  }
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    _, _, runner_service = build_services(tmp_path)
+
+    command = runner_service._normalize_release_prebuild_command(
+        "npx expo prebuild --platform android --clean --no-install",
+        repo,
+    )
+
+    assert command == "npx --yes expo@54.0.22 prebuild --platform android --clean --no-install"
+
+
 def test_runner_marks_failed_and_preserves_worktree_when_firebase_distribution_fails(tmp_path: Path):
     init_asiento_repo(tmp_path)
     _, mission_service, runner_service = build_services(tmp_path, fail_on_firebase=True)
@@ -301,3 +375,99 @@ def test_interrupt_resets_running_task_to_ready_for_resume(tmp_path: Path):
 
         assert mission_record.status == "interrupted"
         assert task_record.status == "ready"
+
+
+def test_recover_stale_run_preserves_completed_task_artifact(tmp_path: Path):
+    init_asiento_repo(tmp_path)
+    _, mission_service, runner_service = build_services(tmp_path)
+
+    mission = mission_service.create_mission(
+        MissionCreateRequest(
+            brief="Refactor visual end-to-end para unificar screens y componentes mobile.",
+            mission_type="refactor",
+            linked_repositories=["asiento-libre"],
+            linked_products=["Asiento Libre"],
+            policy="autopilot",
+            merge_target="main",
+            deploy_targets=["android-firebase-app-distribution"],
+        )
+    )
+
+    stale_time = utcnow() - timedelta(days=365)
+    with runner_service.session_factory() as session:
+        run = MissionRunRecord(
+            mission_id=mission.id,
+            status="running",
+            current_task_key="implement-asiento-libre-foundation",
+            branch_name=f"codex/mission-{mission.id[:8]}",
+            worktree_path=str(tmp_path / "runs" / mission.id / "worktree" / "asiento-libre"),
+            merge_target="main",
+            deploy_targets=["android-firebase-app-distribution"],
+            started_at=stale_time,
+            last_heartbeat_at=stale_time,
+        )
+        session.add(run)
+        mission_record = session.get(MissionRecord, mission.id)
+        mission_record.status = "running"
+        task_record = session.execute(
+            select(ExecutionTaskRecord).where(
+                ExecutionTaskRecord.mission_id == mission.id,
+                ExecutionTaskRecord.task_key == "implement-asiento-libre-foundation",
+            )
+        ).scalar_one()
+        task_record.status = "running"
+        session.add(
+            CommandExecutionRecord(
+                run_id=run.id,
+                mission_id=mission.id,
+                task_key="implement-asiento-libre-foundation",
+                kind="codex",
+                command="codex exec (frontend-implementer)",
+                cwd=str(tmp_path / "runs" / mission.id / "worktree" / "asiento-libre"),
+                status="running",
+                log_path=str(tmp_path / "runs" / mission.id / "logs" / "implement-asiento-libre-foundation" / "codex.log"),
+            )
+        )
+        session.add(
+            ArtifactRecord(
+                mission_id=mission.id,
+                kind="diff_summary",
+                title="Diff Summary · implement-asiento-libre-foundation",
+                body="commit abc123\n\n    Mission batch\n",
+                repo_scope=["asiento-libre"],
+                attributes={
+                    "task_key": "implement-asiento-libre-foundation",
+                    "commit_sha": "abc123",
+                    "commit_subject": "Mission batch",
+                    "files_changed": 1,
+                    "insertions": 1,
+                    "deletions": 0,
+                    "changed_files": [{"status": "M", "path": "app.tsx"}],
+                },
+            )
+        )
+        session.commit()
+
+    runner_service.recover_stale_runs()
+
+    with runner_service.session_factory() as session:
+        run_record = session.execute(
+            select(MissionRunRecord).where(MissionRunRecord.mission_id == mission.id)
+        ).scalar_one()
+        mission_record = session.get(MissionRecord, mission.id)
+        task_record = session.execute(
+            select(ExecutionTaskRecord).where(
+                ExecutionTaskRecord.mission_id == mission.id,
+                ExecutionTaskRecord.task_key == "implement-asiento-libre-foundation",
+            )
+        ).scalar_one()
+        command_record = session.execute(
+            select(CommandExecutionRecord).where(CommandExecutionRecord.run_id == run_record.id)
+        ).scalar_one()
+
+        assert run_record.status == "interrupted"
+        assert mission_record.status == "interrupted"
+        assert run_record.current_task_key is None
+        assert "preserving the last completed task" in (run_record.last_error or "")
+        assert task_record.status == "completed"
+        assert command_record.status == "interrupted"

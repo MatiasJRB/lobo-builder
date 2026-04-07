@@ -67,9 +67,25 @@ class RunnerService:
             for run in runs:
                 heartbeat = self._coerce_utc(run.last_heartbeat_at or run.updated_at)
                 if heartbeat and heartbeat < stale_before:
-                    run.status = "interrupted"
-                    run.last_error = "Marked interrupted after stale heartbeat on startup."
                     mission = session.get(MissionRecord, run.mission_id)
+                    recovered = self._reconcile_stale_run(session, run)
+                    if self._all_tasks_completed(session, run.mission_id):
+                        run.status = "completed"
+                        run.current_task_key = None
+                        run.completed_at = run.completed_at or utcnow()
+                        run.last_error = None
+                        if mission:
+                            mission.status = "completed"
+                            touched_missions.add(mission.id)
+                        continue
+
+                    run.status = "interrupted"
+                    run.current_task_key = None
+                    run.last_error = (
+                        "Recovered stale run after preserving the last completed task."
+                        if recovered
+                        else "Marked interrupted after stale heartbeat on startup."
+                    )
                     if mission:
                         mission.status = "interrupted"
                         touched_missions.add(mission.id)
@@ -283,6 +299,8 @@ class RunnerService:
             cwd=worktree_path,
         )
         self._ensure_command_success(dirty.exit_code, task.key, dirty.summary)
+        artifact_body = "No code changes were committed for this task."
+        artifact_metadata = {"task_key": task.key, "no_changes": True}
         if dirty.summary.strip():
             self._run_shell_logged(mission.id, run_id, task.key, "git", "git add -A", cwd=worktree_path)
             commit_message = f"Mission {mission.id[:8]}: {task.key}"
@@ -295,23 +313,68 @@ class RunnerService:
                 cwd=worktree_path,
             )
             self._ensure_command_success(commit.exit_code, task.key, commit.summary)
-        diff_summary = self._run_shell_logged(
-            mission.id,
-            run_id,
-            task.key,
-            "git",
-            "git show --stat --format=medium HEAD",
-            cwd=worktree_path,
-        )
-        self._ensure_command_success(diff_summary.exit_code, task.key, diff_summary.summary)
+            diff_summary = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task.key,
+                "git",
+                "git show --stat --format=medium HEAD",
+                cwd=worktree_path,
+            )
+            self._ensure_command_success(diff_summary.exit_code, task.key, diff_summary.summary)
+            name_status = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task.key,
+                "git",
+                "git show --name-status --format= HEAD",
+                cwd=worktree_path,
+            )
+            self._ensure_command_success(name_status.exit_code, task.key, name_status.summary)
+            shortstat = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task.key,
+                "git",
+                "git show --shortstat --format= HEAD",
+                cwd=worktree_path,
+            )
+            self._ensure_command_success(shortstat.exit_code, task.key, shortstat.summary)
+            commit_sha = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task.key,
+                "git",
+                "git rev-parse HEAD",
+                cwd=worktree_path,
+            )
+            self._ensure_command_success(commit_sha.exit_code, task.key, commit_sha.summary)
+            commit_subject = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task.key,
+                "git",
+                "git log -1 --pretty=%s",
+                cwd=worktree_path,
+            )
+            self._ensure_command_success(commit_subject.exit_code, task.key, commit_subject.summary)
+            artifact_body = diff_summary.summary
+            artifact_metadata = self._build_commit_diff_metadata(
+                task_key=task.key,
+                diff_stat=diff_summary.summary,
+                shortstat=shortstat.summary,
+                name_status=name_status.summary,
+                commit_sha=commit_sha.summary.strip(),
+                commit_subject=commit_subject.summary.strip(),
+            )
         self._create_artifact(
             mission.id,
             ArtifactPayload(
                 kind="diff_summary",
                 title=f"Diff Summary · {task.key}",
-                body=diff_summary.summary,
+                body=artifact_body,
                 repo_scope=[project.repository],
-                metadata={"task_key": task.key},
+                metadata=artifact_metadata,
             ),
         )
 
@@ -434,12 +497,25 @@ class RunnerService:
             if not distribution or not distribution.app_id or not distribution.testers:
                 raise MissionExecutionError("Android Firebase distribution is configured but appId/testers are missing.")
 
+            install_command = self._release_dependency_install_command(project.package_manager, merge_worktree)
+            if install_command:
+                install = self._run_shell_logged(
+                    mission.id,
+                    run_id,
+                    task.key,
+                    "deps",
+                    install_command,
+                    cwd=merge_worktree,
+                )
+                self._ensure_command_success(install.exit_code, task.key, install.summary)
+
+            prebuild_command = self._normalize_release_prebuild_command(distribution.prebuild_command, merge_worktree)
             prebuild = self._run_shell_logged(
                 mission.id,
                 run_id,
                 task.key,
                 "android-build",
-                distribution.prebuild_command,
+                prebuild_command,
                 cwd=merge_worktree,
             )
             self._ensure_command_success(prebuild.exit_code, task.key, prebuild.summary)
@@ -546,6 +622,64 @@ class RunnerService:
                 metadata={"branch_name": branch_name, "worktree_path": plan.worktree_path},
             ),
         )
+
+    def _reconcile_stale_run(self, session, run: MissionRunRecord) -> bool:
+        recovered = False
+        commands = session.execute(
+            select(CommandExecutionRecord).where(
+                CommandExecutionRecord.run_id == run.id,
+                CommandExecutionRecord.status == "running",
+            )
+        ).scalars()
+        for command in commands:
+            if command.exit_code is not None:
+                command.status = "completed" if command.exit_code == 0 else "failed"
+            else:
+                command.status = "interrupted"
+                command.summary = command.summary or "Marked interrupted after stale heartbeat recovery."
+
+        if not run.current_task_key:
+            return recovered
+
+        task = session.execute(
+            select(ExecutionTaskRecord).where(
+                ExecutionTaskRecord.mission_id == run.mission_id,
+                ExecutionTaskRecord.task_key == run.current_task_key,
+            )
+        ).scalar_one_or_none()
+        if not task:
+            return recovered
+
+        if task.status == "running":
+            if self._task_has_completion_evidence(session, task):
+                task.status = "completed"
+                recovered = True
+            else:
+                task.status = "ready"
+        return recovered
+
+    def _task_has_completion_evidence(self, session, task: ExecutionTaskRecord) -> bool:
+        expected_artifacts = set(task.expected_artifacts or [])
+        if not expected_artifacts:
+            return False
+
+        artifacts = session.execute(
+            select(ArtifactRecord)
+            .where(ArtifactRecord.mission_id == task.mission_id)
+            .order_by(ArtifactRecord.created_at.desc())
+        ).scalars()
+        for artifact in artifacts:
+            attributes = artifact.attributes or {}
+            if artifact.kind in expected_artifacts and attributes.get("task_key") == task.task_key:
+                return True
+        return False
+
+    def _all_tasks_completed(self, session, mission_id: str) -> bool:
+        tasks = session.execute(
+            select(ExecutionTaskRecord).where(ExecutionTaskRecord.mission_id == mission_id)
+        ).scalars()
+        task_list = list(tasks)
+        return bool(task_list) and all(task.status == "completed" for task in task_list)
 
     def _render_prompt(
         self,
@@ -910,6 +1044,124 @@ class RunnerService:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         clipped = " | ".join(line.strip() for line in lines[:24] if line.strip())
         return clipped[:900] or "Autopilot release."
+
+    def _normalize_release_prebuild_command(self, command: str, repo_path: Path) -> str:
+        stripped = command.strip()
+        if not stripped.startswith("npx expo ") or " prebuild" not in stripped:
+            return command
+        if stripped.startswith("npx --yes "):
+            return command
+
+        package_ref = self._resolve_expo_cli_package(repo_path)
+        remainder = stripped[len("npx expo "):]
+        return f"npx --yes {package_ref} {remainder}"
+
+    def _resolve_expo_cli_package(self, repo_path: Path) -> str:
+        lock_payload = self._read_json_file(repo_path / "package-lock.json")
+        if lock_payload:
+            packages = lock_payload.get("packages") or {}
+            expo_package = packages.get("node_modules/expo") or {}
+            version = str(expo_package.get("version") or "").strip()
+            if version:
+                return f"expo@{version}"
+
+            dependencies = lock_payload.get("dependencies") or {}
+            expo_dependency = dependencies.get("expo") or {}
+            version = str(expo_dependency.get("version") or "").strip()
+            if version:
+                return f"expo@{version}"
+
+        package_payload = self._read_json_file(repo_path / "package.json")
+        if package_payload:
+            dependency_maps = [
+                package_payload.get("dependencies") or {},
+                package_payload.get("devDependencies") or {},
+            ]
+            for dependency_map in dependency_maps:
+                version = str(dependency_map.get("expo") or "").strip()
+                if version:
+                    return f"expo@{version}"
+
+        return "expo"
+
+    def _release_dependency_install_command(self, package_manager: str, repo_path: Path) -> Optional[str]:
+        package_json = repo_path / "package.json"
+        expo_module = repo_path / "node_modules" / "expo"
+        if not package_json.exists() or expo_module.exists():
+            return None
+
+        manager = (package_manager or "npm").strip().lower()
+        if manager == "npm":
+            return "npm ci" if (repo_path / "package-lock.json").exists() else "npm install"
+        if manager == "pnpm":
+            return "pnpm install --frozen-lockfile" if (repo_path / "pnpm-lock.yaml").exists() else "pnpm install"
+        if manager == "yarn":
+            return "yarn install --frozen-lockfile" if (repo_path / "yarn.lock").exists() else "yarn install"
+        return None
+
+    @staticmethod
+    def _read_json_file(path: Path) -> Optional[dict]:
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _build_commit_diff_metadata(
+        *,
+        task_key: str,
+        diff_stat: str,
+        shortstat: str,
+        name_status: str,
+        commit_sha: str,
+        commit_subject: str,
+    ) -> dict:
+        files_changed, insertions, deletions = RunnerService._parse_shortstat(shortstat)
+        changed_files = RunnerService._parse_name_status(name_status)
+        return {
+            "task_key": task_key,
+            "commit_sha": commit_sha or None,
+            "commit_subject": commit_subject or None,
+            "files_changed": files_changed or len(changed_files),
+            "insertions": insertions,
+            "deletions": deletions,
+            "changed_files": changed_files,
+            "diff_stat": diff_stat,
+        }
+
+    @staticmethod
+    def _parse_shortstat(shortstat: str) -> tuple[int, int, int]:
+        files_changed = 0
+        insertions = 0
+        deletions = 0
+        for chunk in shortstat.splitlines():
+            parts = [part.strip() for part in chunk.split(",") if part.strip()]
+            for part in parts:
+                if "file changed" in part or "files changed" in part:
+                    files_changed = int(part.split()[0])
+                elif "insertion" in part:
+                    insertions = int(part.split()[0])
+                elif "deletion" in part:
+                    deletions = int(part.split()[0])
+        return files_changed, insertions, deletions
+
+    @staticmethod
+    def _parse_name_status(name_status: str) -> list[dict[str, str]]:
+        changed_files: list[dict[str, str]] = []
+        for line in name_status.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            status = parts[0].strip() if parts else "committed"
+            if len(parts) >= 3:
+                path = f"{parts[1].strip()} -> {parts[2].strip()}"
+            else:
+                path = parts[-1].strip()
+            if path:
+                changed_files.append({"status": status or "committed", "path": path})
+        return changed_files
 
     def _shell_quote(self, value: Path | str) -> str:
         text = str(value)

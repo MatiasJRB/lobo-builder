@@ -1,0 +1,151 @@
+---
+import ContentCard from "../components/ContentCard.astro";
+import SectionHeader from "../components/SectionHeader.astro";
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { siteContent } from "../data/site";
+
+const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSteps, links, runtimePointers, closing } =
+  siteContent;
+---
+
+<BaseLayout title={metadata.title} description={metadata.description}>
+  <main class="site-shell">
+    <section class="hero-panel">
+      <div class="hero-copy">
+        <p class="eyebrow">{hero.eyebrow}</p>
+        <h1>{hero.title}</h1>
+        <p class="hero-summary">{hero.summary}</p>
+        <p class="hero-supporting">{hero.supporting}</p>
+        <div class="cta-row">
+          <a class="button" href={hero.primaryCta.href} target="_blank" rel="noreferrer">
+            {hero.primaryCta.label}
+          </a>
+          <a class="button button-secondary" href={hero.secondaryCta.href}>
+            {hero.secondaryCta.label}
+          </a>
+        </div>
+      </div>
+
+      <div class="hero-aside">
+        <div class="stats-grid">
+          {
+            stats.map((stat) => (
+              <article class="stat-card">
+                <strong>{stat.value}</strong>
+                <span>{stat.label}</span>
+                <p>{stat.description}</p>
+              </article>
+            ))
+          }
+        </div>
+
+        <article class="blueprint-card">
+          <p class="card-kicker">Flujo activo</p>
+          <h2>Misión → Spec → Graph → Especialistas → Verify → Release</h2>
+          <p>
+            El valor del sistema está en preservar esa secuencia con gobierno explícito, persistencia
+            operativa y contexto transversal entre repositorios.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section id="como-funciona" class="content-section">
+      <SectionHeader
+        eyebrow="Cómo funciona"
+        title="Del brief a una ejecución gobernada, con el planner siempre al mando."
+        intro="La arquitectura actual evita arrancar a ciegas: primero estructura la misión y recién después habilita edición, verificación y release dentro de una policy concreta."
+      />
+
+      <div class="cards-grid cards-grid-wide">
+        {
+          workflow.map((item) => (
+            <ContentCard title={item.title} description={item.description} footer={item.footer} />
+          ))
+        }
+      </div>
+    </section>
+
+    <section id="puede-hacer" class="content-section">
+      <SectionHeader
+        eyebrow="Qué puede hacer hoy"
+        title="Ya funciona como control plane local-first para misiones reales, no sólo como un planner teórico."
+        intro="La base actual ya persiste estado, organiza contexto, corre un DAG de trabajo y deja trazabilidad suficiente para operar, pausar o retomar una misión."
+      />
+
+      <div class="cards-grid">
+        {
+          capabilities.map((item) => (
+            <ContentCard title={item.title} description={item.description} items={item.items} />
+          ))
+        }
+      </div>
+
+      <div class="band-grid">
+        <article class="band-card">
+          <p class="card-kicker">Policies</p>
+          <h3>Gobierno explícito</h3>
+          <p>
+            `safe`, `delivery`, `prod` y `autopilot` expanden flags concretos para push, merge,
+            deploy y migraciones, en lugar de dejar permisos implícitos.
+          </p>
+        </article>
+
+        <article class="band-card">
+          <p class="card-kicker">Runtime actual</p>
+          <h3>{systemHighlights.title}</h3>
+          <p>{systemHighlights.description}</p>
+          <ul class="card-list">
+            {systemHighlights.items.map((item) => <li>{item}</li>)}
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="proximos-pasos" class="content-section">
+      <SectionHeader
+        eyebrow="Próximos pasos"
+        title="La hoja de ruta profundiza el modelo sin abandonar la disciplina local-first."
+        intro="Lo siguiente no es sumar complejidad por sumar, sino ampliar superficie donde el diseño actual ya muestra una dirección clara."
+      />
+
+      <div class="cards-grid">
+        {
+          nextSteps.map((item) => (
+            <ContentCard kicker="Siguiente ola" title={item.title} description={item.description} footer={item.footer} />
+          ))
+        }
+      </div>
+    </section>
+
+    <section id="cta-final" class="content-section closing-section">
+      <SectionHeader eyebrow={closing.eyebrow} title={closing.title} intro={closing.description} />
+
+      <div class="link-grid">
+        {
+          links.map((link) => (
+            <article class="link-card">
+              <h3>{link.title}</h3>
+              <p>{link.description}</p>
+              <a href={link.href} target="_blank" rel="noreferrer">
+                {link.label}
+              </a>
+            </article>
+          ))
+        }
+      </div>
+
+      <div class="runtime-grid">
+        {
+          runtimePointers.map((pointer) => (
+            <article class="runtime-card">
+              <h3>{pointer.title}</h3>
+              <p>{pointer.description}</p>
+              <code>{pointer.value}</code>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+  </main>
+</BaseLayout>

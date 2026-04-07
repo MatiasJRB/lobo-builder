@@ -156,6 +156,17 @@ class WorktreeFileChangeView(BaseModel):
     path: str
 
 
+class WorktreeBatchView(BaseModel):
+    task_key: Optional[str] = None
+    commit_sha: Optional[str] = None
+    commit_subject: Optional[str] = None
+    files_count: int = 0
+    insertions: int = 0
+    deletions: int = 0
+    changed_files: list[WorktreeFileChangeView] = Field(default_factory=list)
+    diff_stat: Optional[str] = None
+
+
 class WorktreeSnapshotView(BaseModel):
     branch_name: Optional[str] = None
     worktree_path: Optional[str] = None
@@ -163,6 +174,10 @@ class WorktreeSnapshotView(BaseModel):
     changed_files: list[WorktreeFileChangeView] = Field(default_factory=list)
     diff_stat: Optional[str] = None
     head_summary: Optional[str] = None
+    dirty_files_count: int = 0
+    dirty_insertions: int = 0
+    dirty_deletions: int = 0
+    last_committed_batch: Optional[WorktreeBatchView] = None
     note: Optional[str] = None
 
 

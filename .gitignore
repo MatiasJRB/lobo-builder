@@ -7,4 +7,7 @@
 __pycache__/
 *.pyc
 var/
-
+apps/site/node_modules/
+apps/site/dist/
+apps/site/.astro/
+apps/site/.vercel/

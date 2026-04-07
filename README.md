@@ -33,6 +33,32 @@ autonomy-hub
 
 La app levanta por default en [http://127.0.0.1:8042](http://127.0.0.1:8042).
 
+## Sitio Astro público
+
+El repo ahora también incluye una landing estática en Astro bajo `apps/site`, pensada para presentar **Lobo Builder** como frente público del proyecto sin tocar el dashboard ni la API del backend actual.
+
+```bash
+cd /Users/matiasrios/Documents/GitHub/lobo-builder/apps/site
+npm install
+npm run dev
+```
+
+Checks útiles del frontend:
+
+```bash
+npm run check
+npm run build
+```
+
+Deploy recomendado en Vercel:
+
+- framework: `Astro`
+- root directory: `apps/site`
+- build command: `npm run build`
+- output directory: `dist`
+
+La app FastAPI y sus rutas `/api/*` siguen viviendo aparte en el root del proyecto.
+
 ## Variables útiles
 
 - `AUTONOMY_DATABASE_URL`

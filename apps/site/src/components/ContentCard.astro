@@ -1,0 +1,25 @@
+---
+interface Props {
+  kicker?: string;
+  title: string;
+  description: string;
+  items?: string[];
+  footer?: string;
+}
+
+const { kicker, title, description, items = [], footer } = Astro.props;
+---
+
+<article class="content-card">
+  {kicker && <p class="card-kicker">{kicker}</p>}
+  <h3>{title}</h3>
+  <p>{description}</p>
+  {
+    items.length > 0 && (
+      <ul class="card-list">
+        {items.map((item) => <li>{item}</li>)}
+      </ul>
+    )
+  }
+  {footer && <p class="card-footer">{footer}</p>}
+</article>

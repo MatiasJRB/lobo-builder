@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from autonomy_hub.domain.models import (
     MissionCreateRequest,
     MissionRunView,
     MissionView,
+    WorktreeBatchView,
     WorktreeFileChangeView,
     WorktreeSnapshotView,
 )
@@ -260,7 +262,7 @@ class MissionService:
             .order_by(MissionRunRecord.created_at.desc())
         ).scalars().first()
         active_run = self._assemble_run(session, active_run_record) if active_run_record else None
-        worktree_snapshot = self._worktree_snapshot(active_run)
+        worktree_snapshot = self._worktree_snapshot(active_run, artifacts)
 
         return MissionView(
             id=record.id,
@@ -323,21 +325,35 @@ class MissionService:
             updated_at=record.updated_at,
         )
 
-    def _worktree_snapshot(self, active_run: MissionRunView | None) -> WorktreeSnapshotView | None:
+    def _worktree_snapshot(
+        self,
+        active_run: MissionRunView | None,
+        artifacts: list[ArtifactPayload],
+    ) -> WorktreeSnapshotView | None:
         if not active_run or not active_run.worktree_path:
             return None
 
         worktree_path = Path(active_run.worktree_path)
+        last_committed_batch = self._latest_committed_batch(artifacts)
         if not worktree_path.exists():
             return WorktreeSnapshotView(
                 branch_name=active_run.branch_name,
                 worktree_path=active_run.worktree_path,
+                last_committed_batch=last_committed_batch,
                 note="El worktree de esta misión todavía no existe o ya fue removido.",
             )
 
         branch_name = self._git_output(worktree_path, "branch --show-current") or active_run.branch_name
         status_output = self._git_output(worktree_path, "status --short")
         changed_files = self._parse_git_status(status_output)
+        dirty_shortstats = [
+            output
+            for output in [
+                self._git_output(worktree_path, "diff --shortstat"),
+                self._git_output(worktree_path, "diff --cached --shortstat"),
+            ]
+            if output
+        ]
         diff_chunks = [
             output
             for output in [
@@ -347,11 +363,13 @@ class MissionService:
             if output
         ]
         head_summary = self._git_output(worktree_path, "log --oneline -1")
-        note = (
-            "Todavia no hay cambios de archivos en este worktree. El agente sigue en diagnostico o seleccion de superficie."
-            if not changed_files
-            else None
-        )
+        _, dirty_insertions, dirty_deletions = self._sum_shortstats(dirty_shortstats)
+        if changed_files:
+            note = "Hay cambios sin commit en este worktree."
+        elif last_committed_batch:
+            note = "El worktree esta limpio. El ultimo batch ya fue commiteado y el agente puede estar cerrando o diagnosticando el siguiente corte."
+        else:
+            note = "Todavia no hay cambios de archivos en este worktree. El agente sigue en diagnostico o seleccion de superficie."
         return WorktreeSnapshotView(
             branch_name=branch_name,
             worktree_path=str(worktree_path),
@@ -359,7 +377,49 @@ class MissionService:
             changed_files=changed_files,
             diff_stat="\n\n".join(diff_chunks) if diff_chunks else None,
             head_summary=head_summary,
+            dirty_files_count=len(changed_files),
+            dirty_insertions=dirty_insertions,
+            dirty_deletions=dirty_deletions,
+            last_committed_batch=last_committed_batch,
             note=note,
+        )
+
+    def _latest_committed_batch(self, artifacts: list[ArtifactPayload]) -> WorktreeBatchView | None:
+        for artifact in reversed(artifacts):
+            if artifact.kind != "diff_summary":
+                continue
+            batch = self._batch_from_artifact(artifact)
+            if batch and batch.commit_sha:
+                return batch
+        return None
+
+    def _batch_from_artifact(self, artifact: ArtifactPayload) -> WorktreeBatchView | None:
+        metadata = artifact.metadata or {}
+        if metadata.get("no_changes"):
+            return None
+
+        parsed = self._parse_legacy_diff_summary(artifact.body)
+        changed_files = self._coerce_changed_files(metadata.get("changed_files")) or parsed.changed_files
+        commit_sha = metadata.get("commit_sha") or parsed.commit_sha
+        commit_subject = metadata.get("commit_subject") or parsed.commit_subject
+        diff_stat = metadata.get("diff_stat") or artifact.body or parsed.diff_stat
+        files_count = int(metadata.get("files_changed") or metadata.get("files_count") or parsed.files_count or len(changed_files))
+        insertions = int(metadata.get("insertions") or parsed.insertions or 0)
+        deletions = int(metadata.get("deletions") or parsed.deletions or 0)
+        task_key = metadata.get("task_key") or parsed.task_key
+
+        if not any([commit_sha, commit_subject, diff_stat, changed_files]):
+            return None
+
+        return WorktreeBatchView(
+            task_key=task_key,
+            commit_sha=commit_sha,
+            commit_subject=commit_subject,
+            files_count=files_count,
+            insertions=insertions,
+            deletions=deletions,
+            changed_files=changed_files,
+            diff_stat=diff_stat,
         )
 
     def _focused_graph_snapshot(self, mission: MissionView | None) -> GraphSnapshot:
@@ -429,6 +489,79 @@ class MissionService:
             path = line[3:].strip()
             changes.append(WorktreeFileChangeView(status=status, path=path))
         return changes
+
+    @staticmethod
+    def _coerce_changed_files(raw_files) -> list[WorktreeFileChangeView]:
+        if not isinstance(raw_files, list):
+            return []
+
+        changes: list[WorktreeFileChangeView] = []
+        for entry in raw_files:
+            if isinstance(entry, WorktreeFileChangeView):
+                changes.append(entry)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            status = str(entry.get("status") or "committed").strip() or "committed"
+            changes.append(WorktreeFileChangeView(status=status, path=path))
+        return changes
+
+    @staticmethod
+    def _sum_shortstats(shortstats: list[str]) -> tuple[int, int, int]:
+        files_changed = 0
+        insertions = 0
+        deletions = 0
+        for stat in shortstats:
+            files, added, removed = MissionService._parse_shortstat_line(stat)
+            files_changed += files
+            insertions += added
+            deletions += removed
+        return files_changed, insertions, deletions
+
+    @staticmethod
+    def _parse_shortstat_line(shortstat: str) -> tuple[int, int, int]:
+        if not shortstat:
+            return 0, 0, 0
+        files_match = re.search(r"(\d+)\s+files?\schanged", shortstat)
+        insertions_match = re.search(r"(\d+)\s+insertions?\(\+\)", shortstat)
+        deletions_match = re.search(r"(\d+)\s+deletions?\(-\)", shortstat)
+        return (
+            int(files_match.group(1)) if files_match else 0,
+            int(insertions_match.group(1)) if insertions_match else 0,
+            int(deletions_match.group(1)) if deletions_match else 0,
+        )
+
+    @staticmethod
+    def _parse_legacy_diff_summary(body: str) -> WorktreeBatchView:
+        commit_match = re.search(r"^commit\s+([0-9a-f]{7,40})", body, flags=re.MULTILINE)
+        subject = None
+        for line in body.splitlines():
+            if line.startswith("    ") and line.strip():
+                subject = line.strip()
+                break
+
+        changed_files: list[WorktreeFileChangeView] = []
+        for line in body.splitlines():
+            match = re.match(r"^\s*(.+?)\s+\|\s+\d+", line)
+            if not match:
+                continue
+            path = match.group(1).strip()
+            if path:
+                changed_files.append(WorktreeFileChangeView(status="committed", path=path))
+
+        files_count, insertions, deletions = MissionService._parse_shortstat_line(body)
+        return WorktreeBatchView(
+            commit_sha=commit_match.group(1) if commit_match else None,
+            commit_subject=subject,
+            files_count=files_count or len(changed_files),
+            insertions=insertions,
+            deletions=deletions,
+            changed_files=changed_files,
+            diff_stat=body or None,
+        )
 
     @staticmethod
     def _display_kind(kind: str) -> str:
