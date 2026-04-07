@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Thread, current_thread
 from typing import Optional
 
 from sqlalchemy import select
 
 from autonomy_hub.adapters.codex_exec import CodexExecAdapter
 from autonomy_hub.adapters.command_runner import CommandResult, LocalCommandRunner
-from autonomy_hub.adapters.git import GitWorktreePlan, build_worktree_plan, has_remote, primary_remote
+from autonomy_hub.adapters.discord import DiscordWebhookAdapter
+from autonomy_hub.adapters.git import GitWorktreePlan, branch_exists, build_worktree_plan, has_remote, primary_remote
 from autonomy_hub.config import Settings
 from autonomy_hub.db import ArtifactRecord, CommandExecutionRecord, ExecutionTaskRecord, MissionRecord, MissionRunRecord, utcnow
 from autonomy_hub.domain.models import (
@@ -19,8 +21,10 @@ from autonomy_hub.domain.models import (
     ConfigCatalog,
     ExecutionTaskSpec,
     MissionCreateRequest,
+    MissionExecutionControls,
     MissionLogsView,
     MissionRunView,
+    MissionSpec,
     MissionView,
 )
 from autonomy_hub.services.missions import MissionService
@@ -35,6 +39,13 @@ class RunInterrupted(MissionExecutionError):
     pass
 
 
+class RuntimeBudgetExceeded(RunInterrupted):
+    pass
+
+
+logger = logging.getLogger(__name__)
+
+
 class RunnerService:
     def __init__(
         self,
@@ -46,6 +57,7 @@ class RunnerService:
         project_context_resolver: ProjectContextResolver,
         command_runner: Optional[LocalCommandRunner] = None,
         codex_adapter: Optional[CodexExecAdapter] = None,
+        discord_adapter: Optional[DiscordWebhookAdapter] = None,
     ):
         self.settings = settings
         self.session_factory = session_factory
@@ -54,6 +66,10 @@ class RunnerService:
         self.project_context_resolver = project_context_resolver
         self.command_runner = command_runner or LocalCommandRunner()
         self.codex_adapter = codex_adapter or CodexExecAdapter(settings, self.command_runner)
+        self.discord_adapter = discord_adapter or DiscordWebhookAdapter(
+            settings.discord_webhook_url,
+            timeout_seconds=settings.discord_webhook_timeout_seconds,
+        )
         self._threads: dict[str, Thread] = {}
         self._lock = Lock()
 
@@ -95,13 +111,25 @@ class RunnerService:
     def start_run(self, mission_id: str, *, resume: bool = False) -> MissionRunView:
         with self._lock:
             existing_thread = self._threads.get(mission_id)
+            if existing_thread and not existing_thread.is_alive():
+                self._threads.pop(mission_id, None)
+                existing_thread = None
             if existing_thread and existing_thread.is_alive():
-                return self._latest_run(mission_id)
+                latest_run = self._latest_run(mission_id)
+                if latest_run and latest_run.status not in {"completed", "failed", "interrupted"}:
+                    return latest_run
 
         with self.session_factory() as session:
             mission = session.get(MissionRecord, mission_id)
             if not mission:
                 raise KeyError(mission_id)
+            spec = MissionSpec.model_validate(mission.spec_payload or {})
+            controls = spec.execution_controls.normalized(has_deploy_targets=bool(spec.deploy_targets))
+            budget_elapsed_hours = self._runtime_budget_elapsed_hours(session, mission_id)
+            if self._runtime_budget_reached(controls, budget_elapsed_hours):
+                raise RuntimeError(
+                    f"Mission runtime budget reached ({budget_elapsed_hours:.2f}h / {controls.max_runtime_hours}h)."
+                )
 
             latest_run = session.execute(
                 select(MissionRunRecord)
@@ -110,11 +138,25 @@ class RunnerService:
             ).scalars().first()
 
             if resume and latest_run:
-                run = latest_run
-                run.status = "running"
-                run.last_error = None
-                if not run.started_at:
-                    run.started_at = utcnow()
+                if latest_run.completed_at:
+                    run = MissionRunRecord(
+                        mission_id=mission_id,
+                        status="running",
+                        branch_name=latest_run.branch_name,
+                        worktree_path=latest_run.worktree_path,
+                        merge_target=latest_run.merge_target or spec.merge_target,
+                        deploy_targets=latest_run.deploy_targets or spec.deploy_targets,
+                        started_at=utcnow(),
+                        last_heartbeat_at=utcnow(),
+                    )
+                    session.add(run)
+                else:
+                    run = latest_run
+                    run.status = "running"
+                    run.last_error = None
+                    if not run.started_at:
+                        run.started_at = utcnow()
+                    run.completed_at = None
             else:
                 run = MissionRunRecord(
                     mission_id=mission_id,
@@ -142,24 +184,7 @@ class RunnerService:
             raise KeyError(mission_id)
 
         self.command_runner.interrupt(run.id)
-        with self.session_factory() as session:
-            record = session.get(MissionRunRecord, run.id)
-            mission = session.get(MissionRecord, mission_id)
-            if record and record.current_task_key:
-                self._transition_current_task(
-                    session,
-                    mission_id=mission_id,
-                    task_key=record.current_task_key,
-                    next_status="ready",
-                )
-            if record:
-                record.status = "interrupted"
-                record.current_task_key = None
-                record.last_error = "Interrupted by user request."
-                record.last_heartbeat_at = utcnow()
-            if mission:
-                mission.status = "interrupted"
-            session.commit()
+        self._mark_run_interrupted(mission_id, run.id, "Interrupted by user request.")
         return self._latest_run(mission_id)
 
     def list_runs(self, mission_id: str) -> list[MissionRunView]:
@@ -197,11 +222,13 @@ class RunnerService:
                 deploy_targets=mission.spec.deploy_targets,
             )
             project = self.project_context_resolver.resolve(payload)
+            self._record_repo_instruction_summary(mission.id, project)
             self._ensure_worktree(run_id, mission, project)
 
             while True:
                 self._touch_run(run_id)
                 self._fail_if_interrupted(run_id)
+                self._check_runtime_budget(mission.id, run_id)
                 next_task = self._promote_and_pick_next_task(mission_id)
                 if not next_task:
                     self._finish_run(mission_id, run_id)
@@ -215,7 +242,8 @@ class RunnerService:
             self._mark_run_failed(mission_id, run_id, f"Unhandled runner error: {exc}")
         finally:
             with self._lock:
-                self._threads.pop(mission_id, None)
+                if self._threads.get(mission_id) is current_thread():
+                    self._threads.pop(mission_id, None)
 
     def _run_task(
         self,
@@ -226,17 +254,26 @@ class RunnerService:
         project: ResolvedProjectContext,
     ) -> None:
         mission = self.mission_service.get_mission(mission_id)
-        self._set_task_status(mission_id, task.key, "running")
         self._set_run_state(run_id, current_task_key=task.key, status=self._status_for_task(task.key))
+        skip_reason = self._skip_reason(mission, task)
+        if skip_reason:
+            self._skip_task(mission_id, run_id, task, skip_reason)
+            return
+
+        self._set_task_status(mission_id, task.key, "running")
 
         if task.key == "architect-plan":
             self._run_architect(mission, task, project, run_id)
+        elif task.key == "planner-expand-wave-1":
+            self._run_planner_expand(mission, task, run_id)
         elif task.key.startswith("implement-"):
             self._run_implementer(mission, task, project, run_id)
         elif task.key == "verify":
             self._run_verify(mission, task, project, run_id)
         elif task.key == "release":
             self._run_release(mission, task, project, run_id)
+        elif task.key == "deploy":
+            self._run_deploy(mission, task, project, run_id)
         else:
             raise MissionExecutionError(f"Runner does not know how to execute task '{task.key}'.")
 
@@ -269,6 +306,70 @@ class RunnerService:
                 repo_scope=[project.repository],
                 metadata={"task_key": task.key, "profile": task.agent_profile_slug},
             ),
+        )
+
+    def _run_planner_expand(
+        self,
+        mission: MissionView,
+        task: ExecutionTaskSpec,
+        run_id: str,
+    ) -> None:
+        mission = self.mission_service.get_mission(mission.id)
+        planning_context = self.mission_service.planner.planning_context_from_artifacts(mission.artifacts)
+        if not planning_context:
+            raise MissionExecutionError("Adaptive planner expansion requires a planning_context artifact.")
+
+        request = self._mission_request(mission)
+        proposal = self.mission_service.planner.build_decomposition_proposal(
+            request,
+            mission_type=mission.mission_type,
+            spec=mission.spec,
+            planning_context=planning_context,
+        )
+        implementation_tasks = self.mission_service.planner.implementation_tasks_from_proposal(proposal)
+        if implementation_tasks:
+            self._append_execution_tasks(mission.id, implementation_tasks)
+            self._update_task_dependencies(
+                mission.id,
+                task_key="verify",
+                depends_on=[item.key for item in implementation_tasks],
+            )
+            refreshed_mission = self.mission_service.get_mission(mission.id)
+            self._create_artifact(
+                mission.id,
+                ArtifactPayload(
+                    kind="execution_graph",
+                    title="Execution Graph · Expanded Wave 1",
+                    body=self.mission_service.planner._execution_graph_body(refreshed_mission.execution_tasks),
+                    repo_scope=mission.linked_repositories,
+                    metadata={"task_count": len(refreshed_mission.execution_tasks), "source": task.key},
+                ),
+            )
+
+        self._create_artifact(
+            mission.id,
+            ArtifactPayload(
+                kind="decomposition_proposal",
+                title="Decomposition Proposal",
+                body=self.mission_service.planner.decomposition_proposal_body(proposal),
+                repo_scope=mission.linked_repositories,
+                metadata={"proposal": proposal.model_dump(mode="json"), "task_key": task.key},
+            ),
+        )
+
+    @staticmethod
+    def _mission_request(mission: MissionView) -> MissionCreateRequest:
+        return MissionCreateRequest(
+            brief=mission.brief,
+            desired_outcome=mission.desired_outcome,
+            mission_type=mission.mission_type,
+            linked_repositories=mission.linked_repositories,
+            linked_products=mission.linked_products,
+            linked_documents=mission.linked_documents,
+            policy=mission.policy.slug,
+            merge_target=mission.spec.merge_target,
+            deploy_targets=mission.spec.deploy_targets,
+            execution_controls=mission.execution_controls,
         )
 
     def _run_implementer(
@@ -430,6 +531,22 @@ class RunnerService:
         run_id: str,
     ) -> None:
         run = self._require_run(run_id)
+        if mission.policy.slug == "safe":
+            self._create_artifact(
+                mission.id,
+                ArtifactPayload(
+                    kind="pull_request",
+                    title="Safe Policy Release Gate",
+                    body=(
+                        f"Mission policy '{mission.policy.slug}' keeps merge and deploy disabled.\n"
+                        f"Branch '{run.branch_name}' remains isolated in worktree '{run.worktree_path}'.\n"
+                        "The branch is ready for manual review, push, or PR handling outside runner v1."
+                    ),
+                    repo_scope=[project.repository],
+                    metadata={"task_key": task.key, "policy": mission.policy.slug, "branch_name": run.branch_name},
+                ),
+            )
+            return
         merge_target = run.merge_target or project.default_branch
         release_repo = project.repo_path
         self._ensure_release_repo_ready(mission.id, run_id, task.key, release_repo, merge_target)
@@ -476,78 +593,19 @@ class RunnerService:
             )
             self._ensure_command_success(push.exit_code, task.key, push.summary)
 
+        explicit_deploy_stage = self._mission_has_explicit_deploy_stage(mission)
         distribution = project.android_distribution
-        if "android-firebase-app-distribution" in project.release_targets:
+        if not explicit_deploy_stage and "android-firebase-app-distribution" in project.release_targets:
             if not distribution or not distribution.app_id or not distribution.testers:
                 raise MissionExecutionError("Android Firebase distribution is configured but appId/testers are missing.")
 
-            install_command = self._release_dependency_install_command(project.package_manager, release_repo)
-            if install_command:
-                install = self._run_shell_logged(
-                    mission.id,
-                    run_id,
-                    task.key,
-                    "deps",
-                    install_command,
-                    cwd=release_repo,
-                )
-                self._ensure_command_success(install.exit_code, task.key, install.summary)
-
-            prebuild_command = self._normalize_release_prebuild_command(distribution.prebuild_command, release_repo)
-            prebuild = self._run_shell_logged(
-                mission.id,
-                run_id,
-                task.key,
-                "android-build",
-                prebuild_command,
-                cwd=release_repo,
-            )
-            self._ensure_command_success(prebuild.exit_code, task.key, prebuild.summary)
-
-            assemble = self._run_shell_logged(
-                mission.id,
-                run_id,
-                task.key,
-                "android-build",
-                distribution.assemble_command,
-                cwd=release_repo / "android",
-            )
-            self._ensure_command_success(assemble.exit_code, task.key, assemble.summary)
-
-            release_notes = self._release_notes_body(release_repo / distribution.release_notes_path)
-            distribute = self._run_shell_logged(
-                mission.id,
-                run_id,
-                task.key,
-                "firebase",
-                (
-                    f"firebase appdistribution:distribute {self._shell_quote(release_repo / distribution.apk_path)} "
-                    f"--app {self._shell_quote(distribution.app_id)} "
-                    f"--testers {self._shell_quote(distribution.testers)} "
-                    f"--release-notes {self._shell_quote(release_notes)}"
-                    + (
-                        f" --project {self._shell_quote(distribution.firebase_project)}"
-                        if distribution.firebase_project
-                        else ""
-                    )
-                ),
-                cwd=release_repo,
-            )
-            self._ensure_command_success(distribute.exit_code, task.key, distribute.summary)
-
-            self._create_artifact(
-                mission.id,
-                ArtifactPayload(
-                    kind="deployment",
-                    title="Android Firebase Distribution",
-                    body=distribute.summary,
-                    repo_scope=[project.repository],
-                    metadata={
-                        "task_key": task.key,
-                        "target": "android-firebase-app-distribution",
-                        "apk_path": str(release_repo / distribution.apk_path),
-                    },
-                ),
+            self._deploy_android_firebase_distribution(
+                mission=mission,
+                task_key=task.key,
+                project=project,
+                run_id=run_id,
+                release_repo=release_repo,
+                distribution=distribution,
             )
 
         release_note_body = self._release_notes_body(release_repo / (distribution.release_notes_path if distribution else "RELEASE_NOTES.md"))
@@ -572,6 +630,108 @@ class RunnerService:
             ),
         )
 
+    def _run_deploy(
+        self,
+        mission: MissionView,
+        task: ExecutionTaskSpec,
+        project: ResolvedProjectContext,
+        run_id: str,
+    ) -> None:
+        release_repo = project.repo_path
+        distribution = project.android_distribution
+
+        if "android-firebase-app-distribution" in project.release_targets:
+            if not distribution or not distribution.app_id or not distribution.testers:
+                raise MissionExecutionError("Android Firebase distribution is configured but appId/testers are missing.")
+
+            self._deploy_android_firebase_distribution(
+                mission=mission,
+                task_key=task.key,
+                project=project,
+                run_id=run_id,
+                release_repo=release_repo,
+                distribution=distribution,
+            )
+
+    def _deploy_android_firebase_distribution(
+        self,
+        *,
+        mission: MissionView,
+        task_key: str,
+        project: ResolvedProjectContext,
+        run_id: str,
+        release_repo: Path,
+        distribution,
+    ) -> None:
+        install_command = self._release_dependency_install_command(project.package_manager, release_repo)
+        if install_command:
+            install = self._run_shell_logged(
+                mission.id,
+                run_id,
+                task_key,
+                "deps",
+                install_command,
+                cwd=release_repo,
+            )
+            self._ensure_command_success(install.exit_code, task_key, install.summary)
+
+        prebuild_command = self._normalize_release_prebuild_command(distribution.prebuild_command, release_repo)
+        prebuild = self._run_shell_logged(
+            mission.id,
+            run_id,
+            task_key,
+            "android-build",
+            prebuild_command,
+            cwd=release_repo,
+        )
+        self._ensure_command_success(prebuild.exit_code, task_key, prebuild.summary)
+
+        assemble = self._run_shell_logged(
+            mission.id,
+            run_id,
+            task_key,
+            "android-build",
+            distribution.assemble_command,
+            cwd=release_repo / "android",
+        )
+        self._ensure_command_success(assemble.exit_code, task_key, assemble.summary)
+
+        release_notes = self._release_notes_body(release_repo / distribution.release_notes_path)
+        distribute = self._run_shell_logged(
+            mission.id,
+            run_id,
+            task_key,
+            "firebase",
+            (
+                f"firebase appdistribution:distribute {self._shell_quote(release_repo / distribution.apk_path)} "
+                f"--app {self._shell_quote(distribution.app_id)} "
+                f"--testers {self._shell_quote(distribution.testers)} "
+                f"--release-notes {self._shell_quote(release_notes)}"
+                + (
+                    f" --project {self._shell_quote(distribution.firebase_project)}"
+                    if distribution.firebase_project
+                    else ""
+                )
+            ),
+            cwd=release_repo,
+        )
+        self._ensure_command_success(distribute.exit_code, task_key, distribute.summary)
+
+        self._create_artifact(
+            mission.id,
+            ArtifactPayload(
+                kind="deployment",
+                title="Android Firebase Distribution",
+                body=distribute.summary,
+                repo_scope=[project.repository],
+                metadata={
+                    "task_key": task_key,
+                    "target": "android-firebase-app-distribution",
+                    "apk_path": str(release_repo / distribution.apk_path),
+                },
+            ),
+        )
+
     def _ensure_worktree(self, run_id: str, mission: MissionView, project: ResolvedProjectContext) -> None:
         run = self._require_run(run_id)
         if run.worktree_path and Path(run.worktree_path).exists():
@@ -587,6 +747,26 @@ class RunnerService:
         )
         for command in plan.commands:
             result = self._run_shell_logged(mission.id, run_id, "runner-bootstrap", "git", command, cwd=project.repo_path)
+            if (
+                result.exit_code != 0
+                and "fetch --all --prune" in command
+                and branch_exists(str(project.repo_path), project.default_branch)
+            ):
+                self._create_artifact(
+                    mission.id,
+                    ArtifactPayload(
+                        kind="repo-bootstrap-warning",
+                        title="Worktree Bootstrap Warning",
+                        body=(
+                            f"Remote fetch failed while preparing '{project.repository}', "
+                            f"but local branch '{project.default_branch}' exists so bootstrap continued.\n"
+                            f"{result.summary}"
+                        ),
+                        repo_scope=[project.repository],
+                        metadata={"task_key": "runner-bootstrap", "repository": project.repository},
+                    ),
+                )
+                continue
             self._ensure_command_success(result.exit_code, "runner-bootstrap", result.summary)
         with self.session_factory() as session:
             record = session.get(MissionRunRecord, run_id)
@@ -663,7 +843,7 @@ class RunnerService:
             select(ExecutionTaskRecord).where(ExecutionTaskRecord.mission_id == mission_id)
         ).scalars()
         task_list = list(tasks)
-        return bool(task_list) and all(task.status == "completed" for task in task_list)
+        return bool(task_list) and all(task.status in {"completed", "skipped"} for task in task_list)
 
     def _render_prompt(
         self,
@@ -699,6 +879,7 @@ class RunnerService:
                 [artifact.model_dump(mode="json") for artifact in artifacts],
                 indent=2,
             ),
+            "{{REPO_INSTRUCTIONS}}": self._repo_instructions_prompt_block(project),
             "{{LINKED_DOCUMENTS}}": "\n".join(mission.linked_documents) or "(none)",
             "{{EXTRA_SECTIONS}}": "\n\n".join(extra_sections or []),
         }
@@ -706,6 +887,94 @@ class RunnerService:
         for token, value in replacements.items():
             rendered = rendered.replace(token, value)
         return rendered.strip()
+
+    def _repo_instructions_prompt_block(self, project: ResolvedProjectContext) -> str:
+        repo_instructions = project.repo_instructions
+        payload = {
+            "repository": project.repository,
+            "agents_paths": repo_instructions.agents_paths,
+            "skill_paths": repo_instructions.skill_paths,
+            "skill_slugs": repo_instructions.skill_slugs,
+            "summary": repo_instructions.summary or "No repo-local instructions detected.",
+            "warnings": repo_instructions.warnings,
+            "policy_override": "Mission policy always wins if repo-local instructions conflict with allowed actions.",
+        }
+        return json.dumps(payload, indent=2)
+
+    def _record_repo_instruction_summary(self, mission_id: str, project: ResolvedProjectContext) -> None:
+        repo_instructions = project.repo_instructions
+        if not (
+            repo_instructions.agents_paths
+            or repo_instructions.skill_paths
+            or repo_instructions.warnings
+            or repo_instructions.summary
+        ):
+            return
+
+        body_lines = [
+            f"Repository: {project.repository}",
+            "Agents paths:",
+            *([f"- {path}" for path in repo_instructions.agents_paths] or ["- none detected"]),
+            "Skill paths:",
+            *([f"- {path}" for path in repo_instructions.skill_paths] or ["- none detected"]),
+            "Skill slugs:",
+            *([f"- {slug}" for slug in repo_instructions.skill_slugs] or ["- none detected"]),
+            f"Summary: {repo_instructions.summary or 'No repo-local instruction summary available.'}",
+            "Warnings:",
+            *([f"- {warning}" for warning in repo_instructions.warnings] or ["- none"]),
+        ]
+        self._create_artifact(
+            mission_id,
+            ArtifactPayload(
+                kind="repo-instructions-summary",
+                title=f"Repo-local Instructions · {project.repository}",
+                body="\n".join(body_lines),
+                repo_scope=[project.repository],
+                metadata={
+                    "repository": project.repository,
+                    "agents_paths": repo_instructions.agents_paths,
+                    "skill_paths": repo_instructions.skill_paths,
+                    "skill_slugs": repo_instructions.skill_slugs,
+                    "warnings": repo_instructions.warnings,
+                },
+            ),
+        )
+
+    def _skip_reason(self, mission: MissionView, task: ExecutionTaskSpec) -> Optional[str]:
+        controls = mission.execution_controls.normalized(has_deploy_targets=bool(mission.spec.deploy_targets))
+
+        if task.key == "verify" and not controls.verify_enabled:
+            return "Verify stage disabled from mission controls."
+        if task.key == "release" and not controls.release_enabled:
+            return "Release stage disabled from mission controls."
+        if task.key == "deploy":
+            if not self._mission_has_explicit_deploy_stage(mission):
+                return "Legacy mission keeps deployment inside the release stage."
+            if not controls.release_enabled:
+                return "Deploy skipped because release is disabled from mission controls."
+            if not controls.deploy_enabled:
+                return "Deploy stage disabled from mission controls."
+            if not mission.policy.can_deploy:
+                return f"Mission policy '{mission.policy.slug}' does not allow deploy actions."
+        return None
+
+    def _skip_task(self, mission_id: str, run_id: str, task: ExecutionTaskSpec, reason: str) -> None:
+        self._create_artifact(
+            mission_id,
+            ArtifactPayload(
+                kind="decision_log",
+                title=f"Stage skipped · {task.key}",
+                body=reason,
+                repo_scope=task.repo_scope,
+                metadata={"task_key": task.key, "skip_reason": reason},
+            ),
+        )
+        self._set_task_status(mission_id, task.key, "skipped")
+        self._set_run_state(run_id, current_task_key=None, status="running")
+
+    @staticmethod
+    def _mission_has_explicit_deploy_stage(mission: MissionView) -> bool:
+        return any(task.key == "deploy" for task in mission.execution_tasks)
 
     def _promote_and_pick_next_task(self, mission_id: str) -> Optional[ExecutionTaskSpec]:
         with self.session_factory() as session:
@@ -716,7 +985,7 @@ class RunnerService:
                     .order_by(ExecutionTaskRecord.created_at.asc())
                 ).scalars()
             )
-            completed = {task.task_key for task in task_records if task.status == "completed"}
+            completed = {task.task_key for task in task_records if task.status in {"completed", "skipped"}}
             for task in task_records:
                 if task.status in {"queued", "blocked"} and all(dep in completed for dep in (task.depends_on or [])):
                     task.status = "ready"
@@ -738,22 +1007,31 @@ class RunnerService:
             )
 
     def _finish_run(self, mission_id: str, run_id: str) -> None:
+        should_notify = False
         with self.session_factory() as session:
             mission = session.get(MissionRecord, mission_id)
             run = session.get(MissionRunRecord, run_id)
+            if run and run.completed_at is not None and run.status in {"completed", "failed", "interrupted"}:
+                return
             if mission:
                 mission.status = "completed"
             if run:
+                should_notify = True
                 run.status = "completed"
                 run.current_task_key = None
                 run.completed_at = utcnow()
                 run.last_heartbeat_at = utcnow()
             session.commit()
+        if should_notify:
+            self._notify_terminal_state(mission_id, run_id)
 
     def _mark_run_failed(self, mission_id: str, run_id: str, error: str) -> None:
+        should_notify = False
         with self.session_factory() as session:
             mission = session.get(MissionRecord, mission_id)
             run = session.get(MissionRunRecord, run_id)
+            if run and run.completed_at is not None and run.status in {"completed", "failed", "interrupted"}:
+                return
             if run and run.current_task_key:
                 self._transition_current_task(
                     session,
@@ -764,17 +1042,23 @@ class RunnerService:
             if mission:
                 mission.status = "failed"
             if run:
+                should_notify = True
                 run.status = "failed"
                 run.current_task_key = None
                 run.last_error = error
                 run.completed_at = utcnow()
                 run.last_heartbeat_at = utcnow()
             session.commit()
+        if should_notify:
+            self._notify_terminal_state(mission_id, run_id)
 
     def _mark_run_interrupted(self, mission_id: str, run_id: str, error: str) -> None:
+        should_notify = False
         with self.session_factory() as session:
             mission = session.get(MissionRecord, mission_id)
             run = session.get(MissionRunRecord, run_id)
+            if run and run.completed_at is not None and run.status in {"completed", "failed", "interrupted"}:
+                return
             if run and run.current_task_key:
                 self._transition_current_task(
                     session,
@@ -785,17 +1069,80 @@ class RunnerService:
             if mission:
                 mission.status = "interrupted"
             if run:
+                should_notify = True
                 run.status = "interrupted"
                 run.current_task_key = None
                 run.last_error = error
                 run.completed_at = utcnow()
                 run.last_heartbeat_at = utcnow()
             session.commit()
+        if should_notify:
+            self._notify_terminal_state(mission_id, run_id)
 
     def _set_task_status(self, mission_id: str, task_key: str, status: str) -> None:
         with self.session_factory() as session:
             self._transition_current_task(session, mission_id=mission_id, task_key=task_key, next_status=status)
             session.commit()
+
+    def _append_execution_tasks(self, mission_id: str, tasks: list[ExecutionTaskSpec]) -> None:
+        with self.session_factory() as session:
+            existing_keys = {
+                record.task_key
+                for record in session.execute(
+                    select(ExecutionTaskRecord).where(ExecutionTaskRecord.mission_id == mission_id)
+                ).scalars()
+            }
+            for task in tasks:
+                if task.key in existing_keys:
+                    continue
+                session.add(
+                    ExecutionTaskRecord(
+                        mission_id=mission_id,
+                        task_key=task.key,
+                        title=task.title,
+                        agent_profile_slug=task.agent_profile_slug,
+                        repo_scope=task.repo_scope,
+                        surface=task.surface,
+                        status=task.status,
+                        acceptance_criteria=task.acceptance_criteria,
+                        expected_artifacts=task.expected_artifacts,
+                        depends_on=task.depends_on,
+                        notes=task.notes,
+                    )
+                )
+            session.commit()
+
+    def _update_task_dependencies(self, mission_id: str, *, task_key: str, depends_on: list[str]) -> None:
+        with self.session_factory() as session:
+            record = session.execute(
+                select(ExecutionTaskRecord).where(
+                    ExecutionTaskRecord.mission_id == mission_id,
+                    ExecutionTaskRecord.task_key == task_key,
+                )
+            ).scalar_one_or_none()
+            if not record:
+                return
+            record.depends_on = depends_on
+            if record.status in {"ready", "queued"}:
+                record.status = "blocked"
+            session.commit()
+
+    def _notify_terminal_state(self, mission_id: str, run_id: str) -> None:
+        if not self.discord_adapter or not self.discord_adapter.enabled():
+            return
+
+        try:
+            mission = self.mission_service.get_mission(mission_id)
+            with self.session_factory() as session:
+                record = session.get(MissionRunRecord, run_id)
+                if not record:
+                    return
+                run = self._assemble_run(session, record)
+            if run.status not in {"completed", "failed", "interrupted"}:
+                return
+            self.discord_adapter.notify_run_finished(mission=mission, run=run)
+        except Exception as exc:  # pragma: no cover - notifications must not break mission closure
+            logger.warning("Discord notification failed for mission %s run %s: %s", mission_id, run_id, exc)
 
     def _transition_current_task(self, session, *, mission_id: str, task_key: str, next_status: str) -> None:
         task = session.execute(
@@ -868,6 +1215,7 @@ class RunnerService:
         )
         self._complete_command_execution(execution.id, result.exit_code, result.summary)
         self._touch_run(run_id)
+        self._check_runtime_budget(mission_id, run_id, task_key=task_key)
         return result
 
     def _run_codex_logged(
@@ -881,12 +1229,13 @@ class RunnerService:
         prompt: str,
         add_dirs: list[Path],
     ):
+        profile = self.catalog.agent_profiles[profile_slug]
         execution = self._create_command_execution(
             mission_id,
             run_id,
             task_key,
             "codex",
-            f"codex exec ({profile_slug})",
+            f"codex exec ({profile_slug}{f' model={profile.model}' if profile.model else ''})",
             cwd,
         )
         result = self.codex_adapter.run(
@@ -896,10 +1245,13 @@ class RunnerService:
             cwd=cwd,
             log_dir=Path(execution.log_path).parent,
             add_dirs=add_dirs,
+            model=profile.model,
+            reasoning_effort=profile.reasoning_effort,
         )
         summary = result.summary or result.final_output
         self._complete_command_execution(execution.id, result.exit_code, summary, log_path=result.log_path)
         self._touch_run(run_id)
+        self._check_runtime_budget(mission_id, run_id, task_key=task_key)
         return result
 
     def _create_command_execution(
@@ -1006,6 +1358,72 @@ class RunnerService:
             updated_at=record.updated_at,
         )
 
+    def _check_runtime_budget(
+        self,
+        mission_id: str,
+        run_id: str,
+        *,
+        task_key: Optional[str] = None,
+    ) -> None:
+        with self.session_factory() as session:
+            mission = session.get(MissionRecord, mission_id)
+            if not mission:
+                return
+            spec = MissionSpec.model_validate(mission.spec_payload or {})
+            controls = spec.execution_controls.normalized(has_deploy_targets=bool(spec.deploy_targets))
+            elapsed_hours = self._runtime_budget_elapsed_hours(session, mission_id)
+            if not self._runtime_budget_reached(controls, elapsed_hours):
+                return
+
+        self._create_artifact(
+            mission_id,
+            ArtifactPayload(
+                kind="runtime_budget_stop",
+                title="Mission runtime budget reached",
+                body=(
+                    f"Mission stopped after reaching the configured runtime budget.\n"
+                    f"Elapsed hours: {elapsed_hours:.2f}\n"
+                    f"Limit hours: {controls.max_runtime_hours}\n"
+                    f"Task at stop: {task_key or self._require_run(run_id).current_task_key or 'idle'}"
+                ),
+                metadata={
+                    "task_key": task_key,
+                    "elapsed_hours": round(elapsed_hours, 2),
+                    "limit_hours": controls.max_runtime_hours,
+                },
+            ),
+        )
+        raise RuntimeBudgetExceeded(
+            f"Mission runtime budget reached ({elapsed_hours:.2f}h / {controls.max_runtime_hours}h)."
+        )
+
+    def _runtime_budget_elapsed_hours(self, session, mission_id: str) -> float:
+        runs = list(
+            session.execute(
+                select(MissionRunRecord)
+                .where(MissionRunRecord.mission_id == mission_id)
+                .order_by(MissionRunRecord.created_at.asc())
+            ).scalars()
+        )
+        if not runs:
+            return 0.0
+
+        now = utcnow()
+        total_seconds = 0.0
+        for run in runs:
+            started_at = self._coerce_utc(run.started_at or run.created_at) or now
+            completed_at = self._coerce_utc(run.completed_at) or now
+            if completed_at < started_at:
+                completed_at = started_at
+            total_seconds += (completed_at - started_at).total_seconds()
+        return round(total_seconds / 3600, 2)
+
+    @staticmethod
+    def _runtime_budget_reached(controls: MissionExecutionControls, elapsed_hours: float) -> bool:
+        if controls.max_runtime_hours is None:
+            return False
+        return elapsed_hours >= controls.max_runtime_hours
+
     def _fail_if_interrupted(self, run_id: str) -> None:
         run = self._require_run(run_id)
         if run.status == "interrupted":
@@ -1018,7 +1436,7 @@ class RunnerService:
     def _status_for_task(self, task_key: str) -> str:
         if task_key == "verify":
             return "verifying"
-        if task_key == "release":
+        if task_key in {"release", "deploy"}:
             return "releasing"
         return "running"
 

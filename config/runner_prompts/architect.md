@@ -9,6 +9,9 @@ Execution task:
 Resolved project context:
 {{PROJECT_JSON}}
 
+Repo-local instructions:
+{{REPO_INSTRUCTIONS}}
+
 Relevant artifacts:
 {{ARTIFACTS}}
 
@@ -24,6 +27,7 @@ Inspect the target repository and documents, then produce an operational decisio
 Constraints:
 - Do not edit code.
 - Start from linked documents and relevant artifacts before reading source files.
+- If a planning context artifact is present, use it as the starting point for repo/document inspection.
 - Inspect only the minimum source files needed to lock the plan. Avoid broad repo sweeps.
 - Always quote paths that contain parentheses, spaces, or shell metacharacters.
 - If you need to inspect app routes, use quoted paths like `'app/(tabs)/profile/index.tsx'`.

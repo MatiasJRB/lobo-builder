@@ -70,6 +70,8 @@ La app FastAPI y sus rutas `/api/*` siguen viviendo aparte en el root del proyec
   - `true` por default
 - `AUTONOMY_DISCOVER_MAX_DEPTH`
   - profundidad máxima de scan local
+- `AUTONOMY_DISCORD_WEBHOOK_URL`
+  - webhook de Discord para avisar cuando un run termina en `completed`, `failed` o `interrupted`
 
 ## API principal
 

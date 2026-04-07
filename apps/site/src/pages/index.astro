@@ -4,7 +4,7 @@ import SectionHeader from "../components/SectionHeader.astro";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import { siteContent } from "../data/site";
 
-const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSteps, links, runtimePointers, closing } =
+const { metadata, hero, stats, workflow, capabilities, systemHighlights, systemSurfaces, links, runtimePointers, closing } =
   siteContent;
 ---
 
@@ -40,11 +40,11 @@ const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSte
         </div>
 
         <article class="blueprint-card">
-          <p class="card-kicker">Flujo activo</p>
-          <h2>Misión → Spec → Graph → Especialistas → Verify → Release</h2>
+          <p class="card-kicker">Modelo operativo</p>
+          <h2>Mission → Spec → Graph → Run → Verify → Release</h2>
           <p>
-            El valor del sistema está en preservar esa secuencia con gobierno explícito, persistencia
-            operativa y contexto transversal entre repositorios.
+            La misión organiza el contexto, el spec fija el contrato, el graph ordena ownership y el
+            runtime ejecuta bajo policies explícitas.
           </p>
         </article>
       </div>
@@ -53,8 +53,8 @@ const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSte
     <section id="como-funciona" class="content-section">
       <SectionHeader
         eyebrow="Cómo funciona"
-        title="Del brief a una ejecución gobernada, con el planner siempre al mando."
-        intro="La arquitectura actual evita arrancar a ciegas: primero estructura la misión y recién después habilita edición, verificación y release dentro de una policy concreta."
+        title="La misión estructura el trabajo antes de que empiece la ejecución."
+        intro="Lobo Builder define un flujo estable para pasar de un brief a una misión operable, con contratos persistidos, ownership claro y un runtime que puede inspeccionarse en cada etapa."
       />
 
       <div class="cards-grid cards-grid-wide">
@@ -68,9 +68,9 @@ const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSte
 
     <section id="puede-hacer" class="content-section">
       <SectionHeader
-        eyebrow="Qué puede hacer hoy"
-        title="Ya funciona como control plane local-first para misiones reales, no sólo como un planner teórico."
-        intro="La base actual ya persiste estado, organiza contexto, corre un DAG de trabajo y deja trazabilidad suficiente para operar, pausar o retomar una misión."
+        eyebrow="Qué Incluye"
+        title="La plataforma combina modelo de misión, runtime operativo, gobierno y observabilidad."
+        intro="La página no resume una etapa del proyecto: presenta las piezas que definen a Lobo Builder como producto y que explican cómo se comporta cuando una misión entra al sistema."
       />
 
       <div class="cards-grid">
@@ -83,16 +83,17 @@ const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSte
 
       <div class="band-grid">
         <article class="band-card">
-          <p class="card-kicker">Policies</p>
-          <h3>Gobierno explícito</h3>
+          <p class="card-kicker">Operación</p>
+          <h3>Cómo se ejecuta una misión</h3>
           <p>
-            `safe`, `delivery`, `prod` y `autopilot` expanden flags concretos para push, merge,
-            deploy y migraciones, en lugar de dejar permisos implícitos.
+            Una misión se corre desde el hub con acciones explícitas de control. El runner prepara el
+            entorno de trabajo, conserva el estado operativo y deja trazabilidad suficiente para
+            entender qué pasó durante la ejecución.
           </p>
         </article>
 
         <article class="band-card">
-          <p class="card-kicker">Runtime actual</p>
+          <p class="card-kicker">Arquitectura</p>
           <h3>{systemHighlights.title}</h3>
           <p>{systemHighlights.description}</p>
           <ul class="card-list">
@@ -102,17 +103,17 @@ const { metadata, hero, stats, workflow, capabilities, systemHighlights, nextSte
       </div>
     </section>
 
-    <section id="proximos-pasos" class="content-section">
+    <section id="arquitectura" class="content-section">
       <SectionHeader
-        eyebrow="Próximos pasos"
-        title="La hoja de ruta profundiza el modelo sin abandonar la disciplina local-first."
-        intro="Lo siguiente no es sumar complejidad por sumar, sino ampliar superficie donde el diseño actual ya muestra una dirección clara."
+        eyebrow="Superficies"
+        title="El sistema se entiende mejor cuando se mira por capas."
+        intro="Planner, runner, dashboard, APIs e integraciones cumplen funciones distintas dentro de un mismo control plane. Esa separación hace que el producto sea gobernable y legible."
       />
 
       <div class="cards-grid">
         {
-          nextSteps.map((item) => (
-            <ContentCard kicker="Siguiente ola" title={item.title} description={item.description} footer={item.footer} />
+          systemSurfaces.map((item) => (
+            <ContentCard kicker="Componente" title={item.title} description={item.description} footer={item.footer} />
           ))
         }
       </div>

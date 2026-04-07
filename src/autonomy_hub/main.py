@@ -9,6 +9,7 @@ from typing import Optional
 
 from autonomy_hub.api.routes import router
 from autonomy_hub.adapters.command_runner import LocalCommandRunner
+from autonomy_hub.adapters.discord import DiscordWebhookAdapter
 from autonomy_hub.config import Settings, get_settings
 from autonomy_hub.db import build_session_factory
 from autonomy_hub.services.config_loader import load_catalog
@@ -29,7 +30,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     if resolved_settings.auto_discover_local:
         graph_service.discover_workspace()
 
-    planner = PlannerService(catalog)
+    planner = PlannerService(catalog, settings=resolved_settings)
     mission_service = MissionService(
         settings=resolved_settings,
         session_factory=session_factory,
@@ -46,6 +47,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         mission_service=mission_service,
         project_context_resolver=project_context_resolver,
         command_runner=command_runner,
+        discord_adapter=DiscordWebhookAdapter(
+            resolved_settings.discord_webhook_url,
+            timeout_seconds=resolved_settings.discord_webhook_timeout_seconds,
+        ),
     )
     runner_service.recover_stale_runs()
 

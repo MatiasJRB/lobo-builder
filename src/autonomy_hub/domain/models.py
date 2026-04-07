@@ -8,10 +8,13 @@ from pydantic import BaseModel, Field
 
 MissionType = Literal["fix", "feature", "refactor", "greenfield"]
 MissionPolicySlug = Literal["safe", "delivery", "prod", "autopilot"]
-TaskStatus = Literal["ready", "queued", "blocked", "running", "completed", "failed"]
+TaskStatus = Literal["ready", "queued", "blocked", "running", "completed", "failed", "skipped"]
 MissionStatus = Literal["planned", "running", "verifying", "releasing", "completed", "failed", "interrupted"]
 RunStatus = MissionStatus
 CommandExecutionStatus = Literal["running", "completed", "failed", "interrupted"]
+TaskSizeHint = Literal["small", "balanced", "large"]
+ReasoningEffort = Literal["low", "medium", "high", "xhigh"]
+PlanningInputKind = Literal["repository", "file", "directory", "string"]
 
 
 class MissionPolicyConfig(BaseModel):
@@ -38,6 +41,12 @@ class AgentProfileConfig(BaseModel):
     required_outputs: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     handoff_rules: list[str] = Field(default_factory=list)
+    owned_surfaces: list[str] = Field(default_factory=list)
+    preferred_task_size: TaskSizeHint = "balanced"
+    max_repo_scope: int = 1
+    can_parallelize: bool = False
+    model: Optional[str] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
 
 
 class TemplateRepositoryShape(BaseModel):
@@ -66,6 +75,18 @@ class AndroidDistributionConfig(BaseModel):
     assemble_command: str = "./gradlew assembleRelease --no-daemon"
 
 
+class ProjectInstructionHints(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+
+
+class RepoInstructionSummary(BaseModel):
+    agents_paths: list[str] = Field(default_factory=list)
+    skill_paths: list[str] = Field(default_factory=list)
+    skill_slugs: list[str] = Field(default_factory=list)
+    summary: str = ""
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ProjectManifest(BaseModel):
     repository: str
     default_branch: Optional[str] = None
@@ -73,6 +94,27 @@ class ProjectManifest(BaseModel):
     verify_commands: list[str] = Field(default_factory=list)
     release_targets: list[str] = Field(default_factory=list)
     android_distribution: Optional[AndroidDistributionConfig] = None
+    instruction_hints: ProjectInstructionHints = Field(default_factory=ProjectInstructionHints)
+
+
+class MissionExecutionControls(BaseModel):
+    verify_enabled: bool = True
+    release_enabled: bool = True
+    deploy_enabled: bool = True
+    max_runtime_hours: Optional[int] = Field(default=None, ge=1)
+
+    def normalized(self, *, has_deploy_targets: bool) -> "MissionExecutionControls":
+        payload = self.model_dump()
+        if not has_deploy_targets:
+            payload["deploy_enabled"] = False
+        return MissionExecutionControls(**payload)
+
+
+class MissionExecutionControlsUpdateRequest(BaseModel):
+    verify_enabled: Optional[bool] = None
+    release_enabled: Optional[bool] = None
+    deploy_enabled: Optional[bool] = None
+    max_runtime_hours: Optional[int] = Field(default=None, ge=1)
 
 
 class IntakeQuestion(BaseModel):
@@ -92,6 +134,7 @@ class MissionCreateRequest(BaseModel):
     policy: MissionPolicySlug = "safe"
     merge_target: Optional[str] = None
     deploy_targets: list[str] = Field(default_factory=list)
+    execution_controls: Optional[MissionExecutionControls] = None
 
 
 class MissionSpec(BaseModel):
@@ -105,6 +148,47 @@ class MissionSpec(BaseModel):
     risks: list[str] = Field(default_factory=list)
     repo_strategy: list[str] = Field(default_factory=list)
     template_slug: Optional[str] = None
+    execution_controls: MissionExecutionControls = Field(default_factory=MissionExecutionControls)
+
+
+class PlanningContextInput(BaseModel):
+    reference: str
+    kind: PlanningInputKind
+    inspectable: bool = False
+    summary: str = ""
+    detected_surfaces: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlanningContext(BaseModel):
+    planning_mode: Literal["fast-path", "adaptive"] = "fast-path"
+    complexity: Literal["simple", "balanced", "complex", "conservative"] = "simple"
+    summary: str
+    mission_signals: list[str] = Field(default_factory=list)
+    repositories: list[PlanningContextInput] = Field(default_factory=list)
+    linked_documents: list[PlanningContextInput] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class WorkUnit(BaseModel):
+    id: str
+    title: str
+    owner_profile_slug: str
+    repo_scope: list[str] = Field(default_factory=list)
+    primary_surface: str
+    outcome: str
+    depends_on: list[str] = Field(default_factory=list)
+    size_hint: TaskSizeHint = "balanced"
+    planning_source: str = "adaptive"
+    rationale: Optional[str] = None
+
+
+class DecompositionProposal(BaseModel):
+    summary: str
+    rationale: str
+    work_units: list[WorkUnit] = Field(default_factory=list)
+    conservative_mode: bool = False
+    unresolved_questions: list[str] = Field(default_factory=list)
 
 
 class ExecutionTaskSpec(BaseModel):
@@ -206,6 +290,9 @@ class DashboardStatusItem(BaseModel):
     artifacts: list[str] = Field(default_factory=list)
     merge_target: Optional[str] = None
     deploy_targets: list[str] = Field(default_factory=list)
+    execution_controls: MissionExecutionControls = Field(default_factory=MissionExecutionControls)
+    runtime_budget_elapsed_hours: float = 0.0
+    runtime_budget_reached: bool = False
     last_command: Optional[str] = None
     last_error: Optional[str] = None
     worktree_snapshot: Optional[WorktreeSnapshotView] = None
@@ -223,6 +310,7 @@ class CommandExecutionView(BaseModel):
     exit_code: Optional[int] = None
     summary: Optional[str] = None
     log_path: Optional[str] = None
+    activity_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -264,6 +352,10 @@ class MissionView(BaseModel):
     linked_products: list[str] = Field(default_factory=list)
     linked_documents: list[str] = Field(default_factory=list)
     spec: MissionSpec
+    execution_controls: MissionExecutionControls = Field(default_factory=MissionExecutionControls)
+    controls_locked: bool = False
+    runtime_budget_elapsed_hours: float = 0.0
+    runtime_budget_reached: bool = False
     artifacts: list[ArtifactPayload] = Field(default_factory=list)
     execution_tasks: list[ExecutionTaskSpec] = Field(default_factory=list)
     active_run: Optional[MissionRunView] = None

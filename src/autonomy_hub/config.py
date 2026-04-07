@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,8 @@ class Settings(BaseSettings):
     discover_max_depth: int = 1
     codex_command: str = "codex"
     runner_heartbeat_timeout_seconds: int = 300
+    discord_webhook_url: Optional[str] = None
+    discord_webhook_timeout_seconds: float = 5.0
 
     model_config = SettingsConfigDict(
         env_prefix="AUTONOMY_",

@@ -10,6 +10,7 @@ from autonomy_hub.adapters.filesystem import discover_git_repositories
 from autonomy_hub.config import Settings
 from autonomy_hub.db import GraphEdgeRecord, GraphNodeRecord, edge_exists
 from autonomy_hub.domain.models import ArtifactPayload, ConfigCatalog, GraphEdgeView, GraphNodeView, GraphSnapshot
+from autonomy_hub.services.project_context import discover_repo_instructions
 
 
 def slugify(value: str) -> str:
@@ -68,6 +69,11 @@ class GraphService:
             )
 
             for repo in discover_git_repositories(target, max_depth=depth):
+                hub_manifest = self.catalog.project_manifests.get(repo.name)
+                repo_instructions = discover_repo_instructions(
+                    repo.path,
+                    hub_manifest.instruction_hints if hub_manifest else None,
+                )
                 repository = self._upsert_node(
                     session,
                     "Repository",
@@ -77,6 +83,10 @@ class GraphService:
                         "path": str(repo.path),
                         "surface": repo.surface,
                         "discovered_from": str(target),
+                        "has_agents": bool(repo_instructions.agents_paths),
+                        "has_skills": bool(repo_instructions.skill_slugs),
+                        "instruction_paths": sorted(set(repo_instructions.agents_paths + repo_instructions.skill_paths)),
+                        "skill_slugs": repo_instructions.skill_slugs,
                     },
                 )
 
@@ -236,6 +246,20 @@ class GraphService:
 
         name = path_candidate.name if path_candidate.exists() else repo_reference
         metadata = {"path": str(path_candidate)} if path_candidate.exists() else {"reference": repo_reference}
+        if path_candidate.exists():
+            hub_manifest = self.catalog.project_manifests.get(name)
+            repo_instructions = discover_repo_instructions(
+                path_candidate,
+                hub_manifest.instruction_hints if hub_manifest else None,
+            )
+            metadata.update(
+                {
+                    "has_agents": bool(repo_instructions.agents_paths),
+                    "has_skills": bool(repo_instructions.skill_slugs),
+                    "instruction_paths": sorted(set(repo_instructions.agents_paths + repo_instructions.skill_paths)),
+                    "skill_slugs": repo_instructions.skill_slugs,
+                }
+            )
         repo_node = self._upsert_node(
             session,
             "Repository",

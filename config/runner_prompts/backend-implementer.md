@@ -9,6 +9,9 @@ Execution task:
 Resolved project context:
 {{PROJECT_JSON}}
 
+Repo-local instructions:
+{{REPO_INSTRUCTIONS}}
+
 Relevant artifacts:
 {{ARTIFACTS}}
 

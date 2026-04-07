@@ -35,6 +35,8 @@ class CodexExecAdapter:
         cwd: Path,
         log_dir: Path,
         add_dirs: Iterable[Path] = (),
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> CodexExecResult:
         log_dir.mkdir(parents=True, exist_ok=True)
         output_path = log_dir / f"{profile_slug}-last-message.txt"
@@ -50,6 +52,10 @@ class CodexExecAdapter:
             "-C",
             self._quote(cwd),
         ]
+        if model:
+            command_parts.extend(["--model", self._quote(model)])
+        if reasoning_effort:
+            command_parts.extend(["-c", self._quote(f"model_reasoning_effort={json.dumps(reasoning_effort)}")])
         for add_dir in add_dirs:
             command_parts.extend(["--add-dir", self._quote(add_dir)])
         command_parts.append(self._quote(prompt))

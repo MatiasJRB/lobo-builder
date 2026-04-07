@@ -5,6 +5,12 @@ profiles:
     accepted_inputs: ["brief", "chat", "mission policy", "graph context"]
     required_outputs: ["mission spec", "execution graph", "task ownership map"]
     allowed_tools: ["graph_lookup", "task_router", "artifact_writer"]
+    owned_surfaces: ["graph", "planning", "spec"]
+    preferred_task_size: balanced
+    max_repo_scope: 8
+    can_parallelize: false
+    model: gpt-5.4
+    reasoning_effort: high
     handoff_rules:
       - Never relinquish global control.
       - Delegate only bounded repo or surface work.
@@ -15,6 +21,12 @@ profiles:
     accepted_inputs: ["mission brief", "linked repos", "graph seed"]
     required_outputs: ["context snapshot", "resolved graph relations"]
     allowed_tools: ["filesystem", "git", "graph_lookup", "document_scan"]
+    owned_surfaces: ["graph", "context"]
+    preferred_task_size: balanced
+    max_repo_scope: 8
+    can_parallelize: false
+    model: gpt-5.4-mini
+    reasoning_effort: medium
     handoff_rules:
       - Always write relationships back to the graph before handoff.
 
@@ -24,6 +36,12 @@ profiles:
     accepted_inputs: ["brief", "mission type", "context snapshot"]
     required_outputs: ["mission spec", "done definition", "acceptance criteria"]
     allowed_tools: ["spec_writer", "template_catalog", "artifact_writer"]
+    owned_surfaces: ["spec", "planning"]
+    preferred_task_size: balanced
+    max_repo_scope: 8
+    can_parallelize: false
+    model: gpt-5.4
+    reasoning_effort: medium
     handoff_rules:
       - No implementation work starts before spec exists.
 
@@ -33,6 +51,12 @@ profiles:
     accepted_inputs: ["mission spec", "context graph", "policy"]
     required_outputs: ["decision log", "repo boundary plan", "parallelism strategy"]
     allowed_tools: ["graph_lookup", "architecture_writer", "adapter_catalog"]
+    owned_surfaces: ["architecture", "planning"]
+    preferred_task_size: balanced
+    max_repo_scope: 8
+    can_parallelize: false
+    model: gpt-5.4
+    reasoning_effort: high
     handoff_rules:
       - Own boundary decisions before implementers take over.
 
@@ -42,6 +66,12 @@ profiles:
     accepted_inputs: ["execution task", "repo ownership", "acceptance criteria"]
     required_outputs: ["diff summary", "branch", "handoff notes"]
     allowed_tools: ["git", "filesystem", "tests", "runtime"]
+    owned_surfaces: ["backend"]
+    preferred_task_size: balanced
+    max_repo_scope: 1
+    can_parallelize: true
+    model: gpt-5.4
+    reasoning_effort: medium
     handoff_rules:
       - Stay inside the assigned backend surface.
 
@@ -51,6 +81,12 @@ profiles:
     accepted_inputs: ["execution task", "repo ownership", "acceptance criteria"]
     required_outputs: ["diff summary", "branch", "handoff notes"]
     allowed_tools: ["git", "filesystem", "tests", "runtime"]
+    owned_surfaces: ["frontend", "mobile"]
+    preferred_task_size: balanced
+    max_repo_scope: 1
+    can_parallelize: true
+    model: gpt-5.4
+    reasoning_effort: medium
     handoff_rules:
       - Stay inside the assigned frontend surface.
 
@@ -60,6 +96,12 @@ profiles:
     accepted_inputs: ["execution task", "repo ownership", "policy"]
     required_outputs: ["environment plan", "migration plan", "deploy handoff"]
     allowed_tools: ["git", "filesystem", "db", "railway", "vercel"]
+    owned_surfaces: ["data-infra", "deploy"]
+    preferred_task_size: balanced
+    max_repo_scope: 1
+    can_parallelize: true
+    model: gpt-5.4
+    reasoning_effort: high
     handoff_rules:
       - Never run migrations or deploy beyond policy gates.
 
@@ -69,6 +111,12 @@ profiles:
     accepted_inputs: ["implementation artifacts", "acceptance criteria", "policy"]
     required_outputs: ["verification report", "risk summary"]
     allowed_tools: ["tests", "runtime", "diff_review", "artifact_writer"]
+    owned_surfaces: ["verification", "review"]
+    preferred_task_size: balanced
+    max_repo_scope: 8
+    can_parallelize: false
+    model: gpt-5.4
+    reasoning_effort: medium
     handoff_rules:
       - Consolidate cross-repo risk before release actions.
 
@@ -78,6 +126,11 @@ profiles:
     accepted_inputs: ["verified artifacts", "policy", "environment targets"]
     required_outputs: ["branch", "pull request", "deployment", "release note"]
     allowed_tools: ["git", "github", "railway", "vercel"]
+    owned_surfaces: ["release", "deploy"]
+    preferred_task_size: balanced
+    max_repo_scope: 8
+    can_parallelize: false
+    model: gpt-5.4-mini
+    reasoning_effort: medium
     handoff_rules:
       - Enforce policy as a hard gate, never as a suggestion.
-

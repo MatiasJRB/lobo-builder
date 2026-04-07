@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import re
 import subprocess
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from autonomy_hub.config import Settings
-from autonomy_hub.db import ArtifactRecord, CommandExecutionRecord, ExecutionTaskRecord, MissionRecord, MissionRunRecord
+from autonomy_hub.db import ArtifactRecord, CommandExecutionRecord, ExecutionTaskRecord, MissionRecord, MissionRunRecord, utcnow
 from autonomy_hub.domain.models import (
     ArtifactPayload,
     CommandExecutionView,
@@ -19,7 +20,10 @@ from autonomy_hub.domain.models import (
     GraphSnapshot,
     MissionLogsView,
     MissionCreateRequest,
+    MissionExecutionControls,
+    MissionExecutionControlsUpdateRequest,
     MissionRunView,
+    MissionSpec,
     MissionView,
     WorktreeBatchView,
     WorktreeFileChangeView,
@@ -112,6 +116,47 @@ class MissionService:
         )
         return self.get_mission(mission_id)
 
+    def update_mission_controls(
+        self,
+        mission_id: str,
+        payload: MissionExecutionControlsUpdateRequest,
+    ) -> MissionView:
+        with self.session_factory() as session:
+            record = session.get(MissionRecord, mission_id)
+            if not record:
+                raise KeyError(mission_id)
+
+            has_runs = session.execute(
+                select(MissionRunRecord).where(MissionRunRecord.mission_id == mission_id)
+            ).scalars().first()
+            if has_runs:
+                raise RuntimeError("Execution controls can only be edited before the first run starts.")
+
+            spec = MissionSpec.model_validate(record.spec_payload or {})
+            controls = spec.execution_controls.normalized(has_deploy_targets=bool(spec.deploy_targets))
+            patch = payload.model_dump(exclude_unset=True)
+            merged = controls.model_copy(update=patch).normalized(has_deploy_targets=bool(spec.deploy_targets))
+
+            spec.execution_controls = merged
+            record.spec_payload = spec.model_dump(mode="json")
+
+            spec_artifact = session.execute(
+                select(ArtifactRecord).where(
+                    ArtifactRecord.mission_id == mission_id,
+                    ArtifactRecord.kind == "spec",
+                )
+            ).scalars().first()
+            if spec_artifact:
+                spec_artifact.body = self.planner._spec_body(spec)
+                spec_artifact.attributes = {
+                    **(spec_artifact.attributes or {}),
+                    "execution_controls": merged.model_dump(mode="json"),
+                }
+
+            session.commit()
+
+        return self.get_mission(mission_id)
+
     def list_missions(self) -> list[MissionView]:
         with self.session_factory() as session:
             mission_records = session.execute(
@@ -182,6 +227,9 @@ class MissionService:
                     artifacts=[artifact.title for artifact in mission.artifacts],
                     merge_target=mission.spec.merge_target,
                     deploy_targets=mission.spec.deploy_targets,
+                    execution_controls=mission.execution_controls,
+                    runtime_budget_elapsed_hours=mission.runtime_budget_elapsed_hours,
+                    runtime_budget_reached=mission.runtime_budget_reached,
                     last_command=active_run.last_command.command if active_run and active_run.last_command else None,
                     last_error=active_run.last_error if active_run else None,
                     worktree_snapshot=worktree_snapshot,
@@ -256,13 +304,20 @@ class MissionService:
             )
             for artifact in artifact_records
         ]
-        active_run_record = session.execute(
-            select(MissionRunRecord)
-            .where(MissionRunRecord.mission_id == record.id)
-            .order_by(MissionRunRecord.created_at.desc())
-        ).scalars().first()
+        spec = MissionSpec.model_validate(record.spec_payload or {})
+        run_records = list(
+            session.execute(
+                select(MissionRunRecord)
+                .where(MissionRunRecord.mission_id == record.id)
+                .order_by(MissionRunRecord.created_at.desc())
+            ).scalars()
+        )
+        active_run_record = run_records[0] if run_records else None
         active_run = self._assemble_run(session, active_run_record) if active_run_record else None
         worktree_snapshot = self._worktree_snapshot(active_run, artifacts)
+        controls = spec.execution_controls.normalized(has_deploy_targets=bool(spec.deploy_targets))
+        runtime_budget_elapsed_hours = self._runtime_budget_elapsed_hours(run_records)
+        runtime_budget_reached = self._runtime_budget_reached(controls, runtime_budget_elapsed_hours)
 
         return MissionView(
             id=record.id,
@@ -274,7 +329,11 @@ class MissionService:
             linked_repositories=record.linked_repositories or [],
             linked_products=record.linked_products or [],
             linked_documents=record.linked_documents or [],
-            spec=record.spec_payload,
+            spec=spec,
+            execution_controls=controls,
+            controls_locked=bool(run_records),
+            runtime_budget_elapsed_hours=runtime_budget_elapsed_hours,
+            runtime_budget_reached=runtime_budget_reached,
             artifacts=artifacts,
             execution_tasks=tasks,
             active_run=active_run,
@@ -321,6 +380,7 @@ class MissionService:
             exit_code=record.exit_code,
             summary=record.summary,
             log_path=record.log_path,
+            activity_at=self._command_activity_at(record),
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
@@ -466,6 +526,73 @@ class MissionService:
             nodes=filtered_nodes,
             edges=filtered_edges,
         )
+
+    @staticmethod
+    def _runtime_budget_elapsed_hours(run_records: list[MissionRunRecord]) -> float:
+        if not run_records:
+            return 0.0
+
+        total_seconds = 0.0
+        now = utcnow()
+        for run in run_records:
+            started_at = MissionService._coerce_utc(run.started_at or run.created_at) or now
+            completed_at = MissionService._coerce_utc(run.completed_at) or now
+            if completed_at < started_at:
+                completed_at = started_at
+            total_seconds += (completed_at - started_at).total_seconds()
+        return round(total_seconds / 3600, 2)
+
+    @staticmethod
+    def _runtime_budget_reached(controls: MissionExecutionControls, elapsed_hours: float) -> bool:
+        if controls.max_runtime_hours is None:
+            return False
+        return elapsed_hours >= controls.max_runtime_hours
+
+    @staticmethod
+    def _command_activity_at(record: CommandExecutionRecord):
+        candidates: list[datetime] = []
+        for candidate in MissionService._command_activity_paths(record):
+            try:
+                stat = candidate.stat()
+            except OSError:
+                continue
+            candidates.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
+
+        if candidates:
+            return max(candidates)
+        return MissionService._coerce_utc(record.updated_at)
+
+    @staticmethod
+    def _command_activity_paths(record: CommandExecutionRecord) -> list[Path]:
+        if not record.log_path:
+            return []
+
+        root = Path(record.log_path)
+        paths: list[Path] = []
+        seen: set[str] = set()
+
+        def add(path: Path) -> None:
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            paths.append(path)
+
+        add(root)
+        if record.kind == "codex" and root.parent.exists():
+            for candidate in sorted(root.parent.glob("*-events.jsonl")):
+                add(candidate)
+            for candidate in sorted(root.parent.glob("*-last-message.txt")):
+                add(candidate)
+        return paths
+
+    @staticmethod
+    def _coerce_utc(value):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=utcnow().tzinfo)
+        return value.astimezone(utcnow().tzinfo)
 
     @staticmethod
     def _git_output(worktree_path: Path, args: str) -> str:

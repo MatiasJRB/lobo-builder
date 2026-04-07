@@ -3,96 +3,98 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Autonomy Hub</title>
+    <title>Autonomy Hub Dashboard</title>
     <link rel="stylesheet" href="/static/styles.css" />
     <script src="/static/dashboard.js" defer></script>
   </head>
   <body>
-    <main class="page-shell">
+    <a class="skip-link" href="#dashboard-main">Saltar al dashboard operativo</a>
+
+    <main id="dashboard-main" class="page-shell">
       <header class="hero">
         <div>
-          <p class="eyebrow">Hub de autonomía guiado por planner</p>
-          <h1>Control local para misiones multi-repo, sin perder de vista el runtime.</h1>
+          <p class="eyebrow">Dashboard operativo del planner</p>
+          <h1>Misiones, runtime y contexto en una sola vista local.</h1>
           <p class="lede">
-            El planner coordina la misión, el grafo mantiene el contexto y cada perfil especialista
-            toma trabajo acotado sin convertir el sistema en una cola opaca.
+            Seguís la misión activa, cambiás de foco sin perder el polling y ves qué puede correr,
+            qué se bloqueó y qué cambió en el worktree sin salir del runtime planner-led.
           </p>
         </div>
-        <div class="hero-card">
+        <div class="hero-card hero-stats" aria-label="Resumen del dashboard">
           <div class="metric">
             <span>Misiones</span>
             <strong id="metric-missions">0</strong>
           </div>
           <div class="metric">
-            <span>Repositorios</span>
+            <span>Repos en foco</span>
             <strong id="metric-repositories">0</strong>
           </div>
           <div class="metric">
-            <span>Nodos del grafo</span>
+            <span>Nodos del contexto</span>
             <strong id="metric-nodes">0</strong>
           </div>
         </div>
       </header>
 
-      <section class="action-bar">
-        <button id="seed-demo">Crear misión demo</button>
-        <button id="discover-local" class="secondary">Descubrir repos locales</button>
-        <code>POST /api/missions</code>
+      <section class="action-bar" aria-label="Acciones principales del dashboard">
+        <div class="action-group">
+          <button id="seed-demo">Crear Misión Demo</button>
+          <button id="discover-local" class="secondary">Descubrir Repos Locales</button>
+          <button id="refresh-dashboard" class="ghost">Actualizar Ahora</button>
+        </div>
+        <div class="action-meta">
+          <p id="refresh-status" class="card-kicker">Sincronización inicial pendiente.</p>
+          <code translate="no">POST /api/missions</code>
+        </div>
       </section>
 
-      <section class="grid">
-        <article class="panel panel-wide">
-          <div class="panel-header">
-            <p class="eyebrow">Runtime</p>
-            <h2>Qué está cambiando ahora</h2>
+      <section id="status-banner" class="status-banner" hidden aria-live="off"></section>
+      <p id="status-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+      <section class="mission-pulse-shell" aria-live="off">
+        <div id="mission-pulse"></div>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel panel-wide" aria-labelledby="focused-mission-title">
+          <div class="panel-header panel-header-top">
+            <div>
+              <p class="eyebrow">Misión enfocada</p>
+              <h2 id="focused-mission-title">Estado actual y acciones primarias</h2>
+            </div>
+            <nav id="section-nav" class="section-nav" aria-label="Ir a panel secundario"></nav>
           </div>
-          <p class="panel-note">Seguí el owner activo, el camino de ejecución actual y la superficie del worktree que el runtime está tocando.</p>
-          <div id="focused-runtime" class="stack"></div>
+          <p class="panel-note">
+            La misión seleccionada manda: acá ves el owner activo, el task actual, el worktree y
+            las acciones operativas principales.
+          </p>
+          <div id="focused-mission" class="stack" aria-live="off"></div>
         </article>
 
-        <article class="panel">
+        <article class="panel" aria-labelledby="queue-title">
           <div class="panel-header">
-            <p class="eyebrow">Cola</p>
-            <h2>Misiones activas</h2>
+            <div>
+              <p class="eyebrow">Selector</p>
+              <h2 id="queue-title">Misiones disponibles</h2>
+            </div>
           </div>
-          <div id="queue-list" class="stack"></div>
+          <p class="panel-note">
+            Cambiá de foco sin perder el polling. La selección queda persistida en la URL.
+          </p>
+          <div id="queue-list" class="stack" aria-live="off"></div>
         </article>
 
-        <article class="panel">
+        <article class="panel panel-secondary" aria-labelledby="section-panel-title">
           <div class="panel-header">
-            <p class="eyebrow">Runtime</p>
-            <h2>Actividad de la misión enfocada</h2>
-          </div>
-          <p class="panel-note">Runs y comandos recientes de la misión que el planner está mostrando ahora.</p>
-          <div class="runtime-feed">
             <div>
-              <h3>Runs</h3>
-              <div id="run-list" class="stack"></div>
-            </div>
-            <div>
-              <h3>Comandos</h3>
-              <div id="logs-list" class="stack"></div>
+              <p class="eyebrow">Panel activo</p>
+              <h2 id="section-panel-title">Runtime, logs o grafo según el foco</h2>
             </div>
           </div>
-        </article>
-
-        <article class="panel panel-wide">
-          <div class="panel-header">
-            <p class="eyebrow">Contexto</p>
-            <h2>Productos, repos, documentos y relaciones de la misión enfocada</h2>
-          </div>
-          <p class="panel-note">Este panel muestra sólo el vecindario de la misión actual, no todo el grafo del workspace.</p>
-          <div id="map-counts" class="chip-row"></div>
-          <div class="map-grid">
-            <div>
-              <h3>Nodos</h3>
-              <div id="node-list" class="stack compact"></div>
-            </div>
-            <div>
-              <h3>Relaciones</h3>
-              <div id="edge-list" class="stack compact"></div>
-            </div>
-          </div>
+          <p class="panel-note">
+            El panel secundario mantiene el foco operativo: usá la navegación para abrir runtime,
+            revisar logs recientes o bajar al contexto del grafo.
+          </p>
+          <div id="section-content" class="stack" aria-live="off"></div>
         </article>
       </section>
     </main>

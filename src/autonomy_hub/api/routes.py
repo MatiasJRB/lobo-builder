@@ -4,7 +4,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
-from autonomy_hub.domain.models import DiscoveryRequest, MissionCreateRequest
+from autonomy_hub.domain.models import (
+    DiscoveryRequest,
+    MissionCreateRequest,
+    MissionExecutionControlsUpdateRequest,
+)
 
 
 router = APIRouter()
@@ -47,6 +51,8 @@ def run_mission(mission_id: str, request: Request):
         return request.app.state.runner_service.start_run(mission_id, resume=False)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Mission not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -57,6 +63,8 @@ def resume_mission(mission_id: str, request: Request):
         return request.app.state.runner_service.start_run(mission_id, resume=True)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Mission not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -67,6 +75,18 @@ def interrupt_mission(mission_id: str, request: Request):
         return request.app.state.runner_service.interrupt_run(mission_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Mission not found") from exc
+
+
+@router.patch("/api/missions/{mission_id}/controls")
+def patch_mission_controls(mission_id: str, payload: MissionExecutionControlsUpdateRequest, request: Request):
+    try:
+        return request.app.state.mission_service.update_mission_controls(mission_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Mission not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/api/missions/{mission_id}/runs")

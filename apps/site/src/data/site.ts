@@ -11,15 +11,15 @@ export const siteContent = {
   metadata: {
     title: "Lobo Builder",
     description:
-      "Planner-led autonomy hub para trabajo autónomo multi-repo, con foco local-first, misiones acotadas y ejecución verificable.",
+      "Lobo Builder es un control plane planner-led y local-first para misiones de software, con Mission Spec, Execution Graph, policies y runtime verificable.",
   },
   hero: {
-    eyebrow: "Planner-led autonomy hub",
-    title: "Lobo Builder coordina trabajo autónomo multi-repo sin convertirlo en una caja negra.",
+    eyebrow: "Planner-led. Mission-centric. Local-first.",
+    title: "Lobo Builder es un control plane para planear, ejecutar y gobernar trabajo autónomo de software.",
     summary:
-      "Es una capa de control local-first para misiones de software: recibe un brief, arma un Mission Spec, construye un Execution Graph y delega la ejecución a perfiles fijos con ownership acotado.",
+      "Recibe un brief, lo convierte en una misión con Mission Spec y Execution Graph, asigna ownership a perfiles fijos y ejecuta el trabajo con policies, trazabilidad y control explícito.",
     supporting:
-      "Hoy el runtime técnico sigue viviendo como autonomy-hub dentro del backend FastAPI, pero esta página presenta el proyecto con una identidad pública más clara y orientada a evaluación.",
+      "No intenta ser otro gestor de tickets ni una caja negra de agentes. Su foco es dar una forma estable de modelar misiones, correrlas sobre repositorios reales y dejar evidencia suficiente para entender qué se decidió, qué se ejecutó y bajo qué permisos.",
     primaryCta: {
       label: "Ver repositorio",
       href: repoBase,
@@ -32,128 +32,128 @@ export const siteContent = {
   stats: [
     {
       value: "9",
-      label: "tipos de nodos",
-      description: "Producto, proyecto, repositorio, entorno, documento, misión, artefacto, perfil y policy.",
+      label: "perfiles fijos",
+      description: "Planner, context mapper, product/spec, architect, implementers, verifier y release/deploy trabajan con ownership acotado.",
     },
     {
       value: "4",
       label: "políticas cerradas",
-      description: "safe, delivery, prod y autopilot para gobernar hasta dónde puede llegar la ejecución.",
+      description: "safe, delivery, prod y autopilot definen permisos reales para escritura, push, merge, deploy y migraciones.",
     },
     {
       value: "6",
       label: "adapters v1",
-      description: "Filesystem local, Git, GitHub, Railway, Vercel y Firebase App Distribution ya modelados.",
+      description: "Filesystem local, Git, GitHub, Railway, Vercel y Firebase App Distribution ya están modelados.",
     },
   ],
   workflow: [
     {
-      title: "1. Intake de misión",
+      title: "1. La misión es la unidad de trabajo",
       description:
-        "El trabajo entra como una misión, no como un ticket aislado ni como un repo suelto. El planner clasifica el brief como fix, feature, refactor o greenfield.",
-      footer: "El objetivo es empezar con contexto de negocio y no sólo con una tarea técnica.",
+        "Lobo Builder trabaja sobre misiones, no sobre prompts sueltos ni sobre un repositorio aislado. Cada misión tiene brief, outcome, policy y referencias a productos, repositorios y documentos.",
+      footer: "Eso permite tratar el trabajo como una unidad operable y no sólo como una lista de tareas.",
     },
     {
-      title: "2. Spec y Execution Graph",
+      title: "2. El planeamiento queda persistido",
       description:
-        "Antes de editar código, el sistema genera un Mission Spec y un Execution Graph. Esa dupla define alcance, dependencias, orden de ejecución y ownership por perfil.",
-      footer: "La misión queda lista para correr con una estructura explícita y persistida.",
+        "Antes de ejecutar cambios, el sistema escribe un Mission Spec con done definition, riesgos y supuestos, y arma un Execution Graph que define orden, dependencias y ownership.",
+      footer: "La misión no arranca improvisada: arranca con contratos explícitos.",
     },
     {
-      title: "3. Especialistas con ownership acotado",
+      title: "3. El planner mantiene el control global",
       description:
-        "El planner mantiene control global y los agentes especialistas reciben superficies concretas: arquitectura, backend, frontend, data/infra, verificación y release.",
-      footer: "No se inventan roles ad hoc; se instancian perfiles fijos con límites claros.",
+        "Los especialistas no reciben autonomía ilimitada. Cada perfil opera dentro de superficies y herramientas acotadas, mientras el planner conserva la coordinación general de la misión.",
+      footer: "La paralelización se logra repitiendo perfiles conocidos, no inventando roles ad hoc.",
     },
     {
-      title: "4. Runner local persistido",
+      title: "4. La ejecución es explícita y local-first",
       description:
-        "La ejecución corre en modo local-first, con worktree, branch, logs, heartbeat, comandos y errores persistidos. El runtime de agentes actual usa codex exec.",
-      footer: "SQLite es el backing store por defecto y Postgres remoto queda como soporte opcional.",
+        "La ejecución vive en el runtime del hub: `run`, `resume` e `interrupt` son acciones explícitas, el runner prepara branch y worktree, y cada run conserva heartbeat, logs, comandos, errores y artefactos.",
+      footer: "Local-first no es una limitación accidental: es parte del diseño operativo.",
     },
     {
-      title: "5. Verificación y release gobernados por policy",
+      title: "5. Verify, release y deploy siguen policies",
       description:
-        "Cada policy expande permisos concretos para push, merge, deploy y migraciones. El release sólo ocurre si la misión lo habilita y pasa por la verificación previa.",
-      footer: "En autopilot ya existe un closed loop inicial con verify, merge local y deploy móvil declarado.",
+        "Las policies no son etiquetas. Expanden permisos concretos para write, push, merge, deploy y migrate, y definen hasta dónde puede llegar la misión durante verify, release y deploy.",
+      footer: "La idea es que el sistema sea gobernable, no simplemente automático.",
     },
   ] satisfies CardItem[],
   capabilities: [
     {
-      title: "Coordinar trabajo más allá de un solo repo",
+      title: "Modelo de misión",
       description:
-        "La unidad operativa es la misión. Eso permite agrupar repositorios, productos, documentos y entornos bajo un mismo objetivo verificable.",
+        "La misión reúne el contexto de negocio y el contexto técnico en una sola entidad que después usa el runtime.",
       items: [
-        "linked_repositories y linked_products en la creación de la misión",
-        "Grafo central con nodos y relaciones persistidas",
-        "Autodiscovery local del workspace para enriquecer contexto",
+        "brief, desired outcome, policy y execution controls",
+        "linked_products, linked_repositories y linked_documents",
+        "Mission Spec, Execution Graph y artifacts asociados",
       ],
     },
     {
-      title: "Mantener observabilidad operativa",
+      title: "Runtime operativo",
       description:
-        "El dashboard actual muestra cola de misiones, estado de worktrees, comandos recientes y vecindad de contexto para la misión enfocada.",
+        "El runtime está pensado para que una misión pueda correrse, inspeccionarse, pausarse y retomarse sin perder contexto operativo.",
       items: [
-        "GET /api/dashboard",
-        "GET /api/missions y runs por misión",
-        "GET /api/graph para snapshot del grafo",
+        "runs persistidos con branch, worktree y current task",
+        "command logs y errores guardados por misión",
+        "verify y release resueltos con comandos determinísticos",
       ],
     },
     {
-      title: "Ejecutar un DAG real de tareas",
+      title: "Gobierno y permisos",
       description:
-        "El runner persiste estados, recupera runs stale, ejecuta tareas por secuencia y conserva el detalle operativo necesario para reanudar o interrumpir.",
+        "Lobo Builder hace explícito qué está permitido en cada misión y qué gates deben cumplirse antes de avanzar.",
       items: [
-        "run, resume e interrupt como acciones explícitas",
-        "Persistencia de logs y artefactos por misión",
-        "Verify y release resueltos con comandos determinísticos",
+        "policies cerradas: safe, delivery, prod y autopilot",
+        "capability flags para read, write, branch, worktree, commit y release",
+        "merge, deploy y migraciones sólo cuando la policy lo habilita",
       ],
     },
     {
-      title: "Aplicar gobierno sin ambigüedad",
+      title: "Contexto y observabilidad",
       description:
-        "Las policies no son etiquetas decorativas. Definen capacidad de escritura, push, merge, deploy y migración a nivel bajo.",
+        "El sistema mantiene una vista operativa del trabajo y una vista estructural del entorno en el que corre.",
       items: [
-        "safe para ciclos controlados",
-        "delivery para entrega con más permisos",
-        "prod y autopilot para escenarios más sensibles",
+        "dashboard FastAPI con cola, estado y grafo",
+        "graph central con nodos de producto, repo, entorno, documento y misión",
+        "descubrimiento de instrucciones repo-locales para respetar contratos existentes",
       ],
     },
   ] satisfies CardItem[],
   systemHighlights: {
-    title: "Lo que hoy ya está operativo",
+    title: "Capas que sostienen el sistema",
     description:
-      "La base ya dejó de ser sólo un planner: materializa el modelo central de misión, un runner local real y el slice inicial de autopilot.",
+      "La arquitectura separa contratos versionados, estado operativo y superficies de ejecución para que el planeamiento y el runtime hablen el mismo idioma.",
     items: [
-      "Mission Spec y Execution Graph generados al crear la misión",
-      "SQLite local por default con opción de Postgres en Railway",
-      "Integraciones modeladas para GitHub, Railway, Vercel y Firebase App Distribution",
+      "config/ y docs/ como contratos versionados del sistema",
+      "DB y var/ como estado operativo, runs y logs",
+      "FastAPI como app host para APIs JSON y dashboard",
     ],
   },
-  nextSteps: [
+  systemSurfaces: [
     {
-      title: "Paralelismo real multi-repo",
+      title: "Planner y perfiles",
       description:
-        "Expandir la ejecución desde secuencias controladas hacia varias superficies en paralelo sin perder ownership ni orden de dependencia.",
-      footer: "Es la siguiente frontera natural del modelo mission-centric.",
+        "El planner clasifica la misión, selecciona estrategia, define ownership y coordina el orden de ejecución. Los demás perfiles existen para tareas concretas, no para reemplazar esa autoridad.",
+      footer: "El catálogo de perfiles es fijo y forma parte del contrato del sistema.",
     },
     {
-      title: "Runners remotos optativos",
+      title: "Runner y ejecución",
       description:
-        "Mover parte de la ejecución a infraestructura remota cuando convenga, manteniendo el modo local como default y no como excepción.",
-      footer: "Railway queda como soporte, no como arquitectura cloud-first.",
+        "El runner toma la misión planeada y la lleva al trabajo concreto sobre el repositorio resuelto, con worktree, branch, logs y recuperación de estado.",
+      footer: "La ejecución usa `codex exec` para especialistas y comandos determinísticos para gates.",
     },
     {
-      title: "Migraciones formales de base de datos",
+      title: "Dashboard y API",
       description:
-        "Pasar de la persistencia actual a un flujo explícito y versionado de migraciones para endurecer el control del estado operativo.",
-      footer: "Esto habilita crecimiento más seguro de contratos y vistas.",
+        "La misma app expone las APIs y la interfaz operativa. No hay una separación entre “sitio de control” y “backend oculto”: el hub sirve ambas superficies.",
+      footer: "La landing pública explica el sistema; el dashboard opera la misión.",
     },
     {
-      title: "Más targets de release y despliegue",
+      title: "Integraciones y destinos",
       description:
-        "Ampliar el rango de destinos además del loop actual de Android Firebase App Distribution y los adapters ya modelados.",
-      footer: "La idea es sumar superficie sin volver el sistema una cola genérica de cloud jobs.",
+        "El sistema modela integraciones de repositorios, deploy y distribución sin convertirlas en side effects implícitos. Git, GitHub, Railway, Vercel y Firebase App Distribution forman parte de esa capa.",
+      footer: "Las integraciones se usan como extensiones del runtime, no como centro del producto.",
     },
   ] satisfies CardItem[],
   links: [
@@ -176,30 +176,30 @@ export const siteContent = {
       label: "Leer arquitectura",
     },
     {
-      title: "Auditoría de spec-forge",
-      description: "Qué piezas del flujo greenfield ya se absorbieron y qué quedó diferido.",
-      href: `${repoBase}/blob/main/docs/spec-forge-audit.md`,
-      label: "Ver auditoría",
+      title: "Quick start",
+      description: "Cómo levantar el hub local, probar la API y recorrer el layout principal del repo.",
+      href: `${repoBase}#quick-start`,
+      label: "Ver quick start",
     },
   ],
   runtimePointers: [
     {
-      title: "Dashboard operativo actual",
+      title: "Dashboard operativo",
       description:
-        "La UI operativa sigue en el backend FastAPI. Esta landing no la reemplaza; la complementa.",
-      value: "autonomy-hub -> http://127.0.0.1:8042/",
+        "La UI operativa vive en FastAPI y sirve para inspeccionar misiones, estado, artefactos y grafo.",
+      value: "http://127.0.0.1:8042/",
     },
     {
-      title: "API activa",
+      title: "API de control",
       description:
-        "Los endpoints existentes siguen siendo la interfaz del control plane para misiones, graph y estado.",
-      value: "/api/dashboard · /api/missions · /api/graph",
+        "El control plane actual se opera por endpoints concretos; la landing sólo explica el sistema.",
+      value: "GET /api/dashboard · POST /api/missions · /run · /resume · /interrupt",
     },
   ],
   closing: {
-    eyebrow: "Próximo paso",
-    title: "Evaluar el concepto, correr el hub local y usar esta base como frente público del proyecto.",
+    eyebrow: "Dónde seguir",
+    title: "La landing funciona como mapa del producto; el repo y el hub local muestran el sistema en operación.",
     description:
-      "La combinación actual es intencional: Astro para explicar y posicionar Lobo Builder, FastAPI para operar el runtime real de autonomy-hub sin tocar su contrato existente.",
+      "Si querés entender Lobo Builder en detalle, esta página te da el marco conceptual y el repositorio te lleva al contrato técnico completo: arquitectura, quick start, APIs, policies, perfiles e implementación del runtime.",
   },
 };
