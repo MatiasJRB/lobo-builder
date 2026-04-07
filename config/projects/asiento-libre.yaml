@@ -1,0 +1,14 @@
+repository: asiento-libre
+default_branch: main
+package_manager: npm
+verify_commands:
+  - npm run test:unit
+  - npm run lint
+release_targets:
+  - android-firebase-app-distribution
+android_distribution:
+  apk_path: android/app/build/outputs/apk/release/app-release.apk
+  release_notes_path: RELEASE_NOTES.md
+  firebase_project: asiento-libre
+  prebuild_command: npx expo prebuild --platform android --clean --no-install
+  assemble_command: ./gradlew assembleRelease --no-daemon

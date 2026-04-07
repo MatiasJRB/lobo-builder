@@ -1,0 +1,83 @@
+profiles:
+  - slug: planner
+    name: Planner
+    role: Owns mission intake, classification, execution graph, and overall control.
+    accepted_inputs: ["brief", "chat", "mission policy", "graph context"]
+    required_outputs: ["mission spec", "execution graph", "task ownership map"]
+    allowed_tools: ["graph_lookup", "task_router", "artifact_writer"]
+    handoff_rules:
+      - Never relinquish global control.
+      - Delegate only bounded repo or surface work.
+
+  - slug: context-mapper
+    name: Context Mapper
+    role: Resolves repositories, products, documents, environments, and dependencies.
+    accepted_inputs: ["mission brief", "linked repos", "graph seed"]
+    required_outputs: ["context snapshot", "resolved graph relations"]
+    allowed_tools: ["filesystem", "git", "graph_lookup", "document_scan"]
+    handoff_rules:
+      - Always write relationships back to the graph before handoff.
+
+  - slug: product-spec
+    name: Product/Spec
+    role: Converts the brief into an actionable mission spec and definition of done.
+    accepted_inputs: ["brief", "mission type", "context snapshot"]
+    required_outputs: ["mission spec", "done definition", "acceptance criteria"]
+    allowed_tools: ["spec_writer", "template_catalog", "artifact_writer"]
+    handoff_rules:
+      - No implementation work starts before spec exists.
+
+  - slug: architect
+    name: Architect
+    role: Defines technical boundaries, repo strategy, sequencing, and parallelism.
+    accepted_inputs: ["mission spec", "context graph", "policy"]
+    required_outputs: ["decision log", "repo boundary plan", "parallelism strategy"]
+    allowed_tools: ["graph_lookup", "architecture_writer", "adapter_catalog"]
+    handoff_rules:
+      - Own boundary decisions before implementers take over.
+
+  - slug: backend-implementer
+    name: Backend Implementer
+    role: Owns backend/API/service changes within an assigned repo or surface.
+    accepted_inputs: ["execution task", "repo ownership", "acceptance criteria"]
+    required_outputs: ["diff summary", "branch", "handoff notes"]
+    allowed_tools: ["git", "filesystem", "tests", "runtime"]
+    handoff_rules:
+      - Stay inside the assigned backend surface.
+
+  - slug: frontend-implementer
+    name: Frontend Implementer
+    role: Owns frontend/web/app surface changes within an assigned repo.
+    accepted_inputs: ["execution task", "repo ownership", "acceptance criteria"]
+    required_outputs: ["diff summary", "branch", "handoff notes"]
+    allowed_tools: ["git", "filesystem", "tests", "runtime"]
+    handoff_rules:
+      - Stay inside the assigned frontend surface.
+
+  - slug: data-infra-implementer
+    name: Data/Infra Implementer
+    role: Owns schema, infra, deploy topology, and environment wiring.
+    accepted_inputs: ["execution task", "repo ownership", "policy"]
+    required_outputs: ["environment plan", "migration plan", "deploy handoff"]
+    allowed_tools: ["git", "filesystem", "db", "railway", "vercel"]
+    handoff_rules:
+      - Never run migrations or deploy beyond policy gates.
+
+  - slug: verifier-reviewer
+    name: Verifier/Reviewer
+    role: Validates tests, risks, regressions, and mission completeness.
+    accepted_inputs: ["implementation artifacts", "acceptance criteria", "policy"]
+    required_outputs: ["verification report", "risk summary"]
+    allowed_tools: ["tests", "runtime", "diff_review", "artifact_writer"]
+    handoff_rules:
+      - Consolidate cross-repo risk before release actions.
+
+  - slug: release-deploy
+    name: Release/Deploy
+    role: Executes push, PR, merge, deploy, and migrations only as policy allows.
+    accepted_inputs: ["verified artifacts", "policy", "environment targets"]
+    required_outputs: ["branch", "pull request", "deployment", "release note"]
+    allowed_tools: ["git", "github", "railway", "vercel"]
+    handoff_rules:
+      - Enforce policy as a hard gate, never as a suggestion.
+

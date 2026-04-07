@@ -1,0 +1,51 @@
+templates:
+  - slug: internal-dashboard
+    label: Internal Dashboard
+    description: Local-first internal tool with web surface, API, and Postgres-backed state.
+    when_keywords: ["dashboard", "internal", "ops", "backoffice", "control plane"]
+    stack:
+      frontend: "Next.js or server-rendered UI"
+      backend: "FastAPI"
+      data: "Postgres"
+      deploy: "Vercel + Railway"
+    default_repositories:
+      - name_pattern: "{project_slug}-web"
+        surface: frontend
+        purpose: Internal operator UI
+      - name_pattern: "{project_slug}-api"
+        surface: backend
+        purpose: API and orchestration layer
+    kickoff_artifacts: ["spec", "repo_map", "deployment_plan", "checkpoints"]
+
+  - slug: public-web-app
+    label: Public Web App
+    description: Public-facing app with dedicated web and API repositories.
+    when_keywords: ["landing", "portal", "public", "saas", "web app"]
+    stack:
+      frontend: "Next.js"
+      backend: "FastAPI"
+      data: "Postgres"
+      deploy: "Vercel + Railway"
+    default_repositories:
+      - name_pattern: "{project_slug}-web"
+        surface: frontend
+        purpose: Public web interface
+      - name_pattern: "{project_slug}-api"
+        surface: backend
+        purpose: Application API
+    kickoff_artifacts: ["spec", "repo_map", "milestones", "deployment_plan"]
+
+  - slug: api-service
+    label: API Service
+    description: API-first or worker-first service with minimal web surface requirements.
+    when_keywords: ["api", "service", "worker", "webhook", "automation"]
+    stack:
+      backend: "FastAPI"
+      data: "Postgres"
+      deploy: "Railway"
+    default_repositories:
+      - name_pattern: "{project_slug}-api"
+        surface: backend
+        purpose: Service runtime
+    kickoff_artifacts: ["spec", "repo_map", "environment_plan", "verification_plan"]
+

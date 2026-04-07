@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Autonomy Hub</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Planner-led autonomy hub</p>
+          <h1>Portable multi-repo control plane for local-first software missions.</h1>
+          <p class="lede">
+            The planner owns the mission, the graph keeps the context, and fixed specialist profiles
+            take bounded work without turning the system into a cloud queue.
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="metric">
+            <span>Missions</span>
+            <strong id="metric-missions">0</strong>
+          </div>
+          <div class="metric">
+            <span>Repositories</span>
+            <strong id="metric-repositories">0</strong>
+          </div>
+          <div class="metric">
+            <span>Graph Nodes</span>
+            <strong id="metric-nodes">0</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="action-bar">
+        <button id="seed-demo">Create Demo Mission</button>
+        <button id="discover-local" class="secondary">Discover Local Repos</button>
+        <code>POST /api/missions</code>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-header">
+            <p class="eyebrow">Cola</p>
+            <h2>Active missions</h2>
+          </div>
+          <div id="queue-list" class="stack"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <p class="eyebrow">Live Worktree</p>
+            <h2>What is changing right now</h2>
+          </div>
+          <div id="worktree-view" class="stack"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <p class="eyebrow">Runtime</p>
+            <h2>Recent commands</h2>
+          </div>
+          <div id="logs-list" class="stack"></div>
+        </article>
+
+        <article class="panel panel-wide">
+          <div class="panel-header">
+            <p class="eyebrow">Mission Context</p>
+            <h2>Products, repos, documents, and relations for the focused mission</h2>
+          </div>
+          <p class="panel-note">This panel now shows only the current mission neighborhood, not the full workspace graph.</p>
+          <div id="map-counts" class="chip-row"></div>
+          <div class="map-grid">
+            <div>
+              <h3>Nodes</h3>
+              <div id="node-list" class="stack compact"></div>
+            </div>
+            <div>
+              <h3>Edges</h3>
+              <div id="edge-list" class="stack compact"></div>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      async function fetchJson(path, options) {
+        const response = await fetch(path, options);
+        if (!response.ok) {
+          throw new Error(`Request failed: ${response.status}`);
+        }
+        return response.json();
+      }
+
+      function renderQueue(items) {
+        const target = document.getElementById("queue-list");
+        target.innerHTML = "";
+        if (!items.length) {
+          target.innerHTML = '<p class="empty">No missions yet. Create one from the API or the demo button.</p>';
+          return;
+        }
+
+        items.forEach((item) => {
+          const repoScope = item.linked_repositories.length ? item.linked_repositories.join(", ") : "greenfield";
+          const runtime = item.runtime_state ? `Run: ${item.runtime_state}` : "Run: idle";
+          const branch = item.branch_name ? `Branch: ${item.branch_name}` : "Branch: not started";
+          const task = item.active_task_key ? `Task: ${item.active_task_key}` : "Task: not running";
+          target.insertAdjacentHTML(
+            "beforeend",
+            `
+              <article class="card">
+                <div class="card-head">
+                  <strong>${item.mission_type}</strong>
+                  <span class="pill">${item.policy}</span>
+                </div>
+                <p class="card-copy">Owner: ${item.current_owner}</p>
+                <p class="card-copy">Next: ${item.next_step}</p>
+                <p class="card-meta">Scope: ${repoScope}</p>
+                <p class="card-meta">${runtime}</p>
+                <p class="card-meta">${branch}</p>
+                <p class="card-meta">${task}</p>
+                <p class="card-meta">Changed files: ${item.changed_files_count}</p>
+                <p class="card-meta">${item.worktree_note || "Worktree already has file changes or committed work."}</p>
+                <div class="button-row">
+                  <button data-action="run" data-mission-id="${item.mission_id}">Run</button>
+                  <button class="secondary" data-action="resume" data-mission-id="${item.mission_id}">Resume</button>
+                  <button class="ghost" data-action="interrupt" data-mission-id="${item.mission_id}">Interrupt</button>
+                </div>
+              </article>
+            `
+          );
+        });
+      }
+
+      function renderWorktree(items) {
+        const target = document.getElementById("worktree-view");
+        target.innerHTML = "";
+        if (!items.length) {
+          target.innerHTML = '<p class="empty">No active mission worktree yet.</p>';
+          return;
+        }
+
+        const item = items[0];
+        const snapshot = item.worktree_snapshot;
+        const changedFiles = snapshot?.changed_files || [];
+        const changedFilesMarkup = changedFiles.length
+          ? changedFiles
+              .map((file) => `<li><code>${file.status}</code> ${file.path}</li>`)
+              .join("")
+          : "<li>No file changes yet.</li>";
+        const diffStat = snapshot?.diff_stat
+          ? `<pre class="log-block">${snapshot.diff_stat}</pre>`
+          : '<p class="card-meta">No diff yet.</p>';
+        const deployTargets = item.deploy_targets.length ? item.deploy_targets.join(", ") : "none";
+
+        target.insertAdjacentHTML(
+          "beforeend",
+          `
+            <article class="card">
+              <div class="card-head">
+                <strong>${item.mission_id.slice(0, 8)}</strong>
+                <span class="pill">${item.policy.slug}</span>
+              </div>
+              <p class="card-copy">${item.summary}</p>
+              <p class="card-meta">Merge target: ${item.merge_target || "not declared"}</p>
+              <p class="card-meta">Deploy target: ${deployTargets}</p>
+              <p class="card-meta">Branch: ${snapshot?.branch_name || "not created yet"}</p>
+              <p class="card-meta">Worktree: ${snapshot?.worktree_path || "not created yet"}</p>
+              <p class="card-meta">Last command: ${item.last_command || "none yet"}</p>
+              <p class="card-meta">Last error: ${item.last_error || "none"}</p>
+              <p class="card-meta emphasis">${snapshot?.note || "There are file-level changes in progress."}</p>
+              <div class="subsection">
+                <h3>Changed files</h3>
+                <ul class="plain-list">${changedFilesMarkup}</ul>
+              </div>
+              <div class="subsection">
+                <h3>Current diff</h3>
+                ${diffStat}
+              </div>
+            </article>
+          `
+        );
+      }
+
+      function renderLogs(items) {
+        const target = document.getElementById("logs-list");
+        target.innerHTML = "";
+        if (!items.length) {
+          target.innerHTML = '<p class="empty">No command executions yet.</p>';
+          return;
+        }
+
+        items.forEach((item) => {
+          target.insertAdjacentHTML(
+            "beforeend",
+            `
+              <article class="card">
+                <div class="card-head">
+                  <strong>${item.kind}</strong>
+                  <span class="pill">${item.status}</span>
+                </div>
+                <p class="card-copy">${item.command}</p>
+                <p class="card-meta">Task: ${item.task_key}</p>
+                <p class="card-meta">Exit: ${item.exit_code ?? "running"}</p>
+                <p class="card-meta">Log: ${item.log_path || "n/a"}</p>
+              </article>
+            `
+          );
+        });
+      }
+
+      function renderMap(graph) {
+        document.getElementById("metric-nodes").textContent = graph.nodes.length;
+        document.getElementById("metric-repositories").textContent = graph.counts.Repository || 0;
+
+        const countsTarget = document.getElementById("map-counts");
+        countsTarget.innerHTML = "";
+        Object.entries(graph.counts).forEach(([key, value]) => {
+          countsTarget.insertAdjacentHTML(
+            "beforeend",
+            `<span class="chip">${key}: ${value}</span>`
+          );
+        });
+
+        const nodeTarget = document.getElementById("node-list");
+        nodeTarget.innerHTML = "";
+        graph.nodes.slice(0, 18).forEach((node) => {
+          nodeTarget.insertAdjacentHTML(
+            "beforeend",
+            `<div class="list-item"><strong>${node.kind}</strong><span>${node.name}</span></div>`
+          );
+        });
+
+        const edgeTarget = document.getElementById("edge-list");
+        edgeTarget.innerHTML = "";
+        graph.edges.slice(0, 18).forEach((edge) => {
+          edgeTarget.insertAdjacentHTML(
+            "beforeend",
+            `<div class="list-item"><strong>${edge.relation}</strong><span>${edge.source_key} → ${edge.target_key}</span></div>`
+          );
+        });
+      }
+
+      async function refreshDashboard() {
+        const snapshot = await fetchJson("/api/dashboard");
+        document.getElementById("metric-missions").textContent = snapshot.queue.length;
+        renderQueue(snapshot.queue);
+        renderWorktree(snapshot.status);
+        renderLogs(snapshot.recent_commands || []);
+        renderMap(snapshot.map);
+      }
+
+      async function postMissionAction(missionId, action) {
+        await fetchJson(`/api/missions/${missionId}/${action}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" }
+        });
+        await refreshDashboard();
+      }
+
+      async function createDemoMission() {
+        await fetchJson("/api/missions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            brief: "Greenfield internal dashboard that coordinates frontend and backend repos for a new ops initiative.",
+            desired_outcome: "Bootstrap a new project shell, pick a stack template, and prepare the first implementation wave.",
+            linked_products: ["Autonomy Demo"],
+            policy: "safe"
+          })
+        });
+        await refreshDashboard();
+      }
+
+      async function discoverLocal() {
+        await fetchJson("/api/discovery/local", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ max_depth: 1 })
+        });
+        await refreshDashboard();
+      }
+
+      document.getElementById("seed-demo").addEventListener("click", createDemoMission);
+      document.getElementById("discover-local").addEventListener("click", discoverLocal);
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-action]");
+        if (!button) {
+          return;
+        }
+        postMissionAction(button.dataset.missionId, button.dataset.action).catch(console.error);
+      });
+
+      refreshDashboard();
+      setInterval(refreshDashboard, 15000);
+    </script>
+  </body>
+</html>

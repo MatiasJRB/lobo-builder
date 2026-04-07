@@ -1,0 +1,56 @@
+policies:
+  - slug: safe
+    label: Safe
+    description: Read, write, branch, worktree, commit, push, and PR only.
+    can_read: true
+    can_write: true
+    can_branch: true
+    can_worktree: true
+    can_commit: true
+    can_push: true
+    can_open_pr: true
+    can_merge: false
+    can_deploy: false
+    can_migrate: false
+
+  - slug: delivery
+    label: Delivery
+    description: Safe policy plus deploys in non-production contexts.
+    can_read: true
+    can_write: true
+    can_branch: true
+    can_worktree: true
+    can_commit: true
+    can_push: true
+    can_open_pr: true
+    can_merge: false
+    can_deploy: true
+    can_migrate: false
+
+  - slug: prod
+    label: Prod
+    description: Delivery policy plus merge, production deploy, and migrations.
+    can_read: true
+    can_write: true
+    can_branch: true
+    can_worktree: true
+    can_commit: true
+    can_push: true
+    can_open_pr: true
+    can_merge: true
+    can_deploy: true
+    can_migrate: true
+
+  - slug: autopilot
+    label: Autopilot
+    description: Autonomous delivery loop with merge-to-main and non-production/mobile deploy targets.
+    can_read: true
+    can_write: true
+    can_branch: true
+    can_worktree: true
+    can_commit: true
+    can_push: true
+    can_open_pr: true
+    can_merge: true
+    can_deploy: true
+    can_migrate: false

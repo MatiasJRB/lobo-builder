@@ -1,0 +1,76 @@
+questions:
+  - key: project_name
+    prompt: What is the working name for the project shell?
+    required: true
+    purpose: Anchor the product/project nodes and repo map.
+
+  - key: one_liner
+    prompt: What is the one-line description of the product?
+    required: true
+    purpose: Seed the mission summary and starter README.
+
+  - key: target_user
+    prompt: Who is the target user or operator?
+    required: true
+    purpose: Keep spec and stack choice grounded in actual usage.
+
+  - key: problem
+    prompt: What problem is this project solving right now?
+    required: true
+    purpose: Prevent over-scaffolding around vague ambitions.
+
+  - key: mvp_boundary
+    prompt: What is in scope for the first executable scaffold and what is explicitly out?
+    required: true
+    purpose: Drive repo map, milestones, and Definition of Done.
+
+  - key: primary_flow
+    prompt: What is the primary user or operator flow for the first milestone?
+    required: true
+    purpose: Identify the minimum surfaces to scaffold.
+
+  - key: entities
+    prompt: Which entities, resources, or records does the system need to know about?
+    required: true
+    purpose: Seed data model and graph relationships.
+
+  - key: frontend_surface
+    prompt: What does the user-facing surface need to look like in the first cut?
+    required: false
+    purpose: Help template selection bias toward web/internal/public surfaces.
+
+  - key: backend_needs
+    prompt: What backend, workflow, or automation capabilities are required first?
+    required: false
+    purpose: Decide if API-only or fullstack templates are a better fit.
+
+  - key: auth_needs
+    prompt: What auth or permission model is required for v1?
+    required: false
+    purpose: Keep permissions explicit early.
+
+  - key: integrations
+    prompt: Which external systems must be considered on day one?
+    required: false
+    purpose: Shape adapter selection and environment planning.
+
+  - key: success_definition
+    prompt: What would count as a successful first milestone?
+    required: true
+    purpose: Seed milestone backlog and verifier acceptance criteria.
+
+  - key: first_cycle_goal
+    prompt: What should the very first build cycle accomplish?
+    required: true
+    purpose: Produce an actionable first implementation wave.
+
+  - key: final_checkpoint
+    prompt: What is the handoff or launch checkpoint for this mission?
+    required: true
+    purpose: Tie the release profile to a concrete endpoint.
+
+  - key: notes
+    prompt: Any constraints, preferences, or caveats worth preserving?
+    required: false
+    purpose: Carry over human context without turning it into hidden assumptions.
+
