@@ -430,25 +430,9 @@ class RunnerService:
         run_id: str,
     ) -> None:
         run = self._require_run(run_id)
-        mission_worktree = Path(run.worktree_path)
         merge_target = run.merge_target or project.default_branch
-        merge_worktree = self.settings.runs_dir / mission.id / "merge-target"
-        merge_worktree.parent.mkdir(parents=True, exist_ok=True)
-
-        if not merge_worktree.exists():
-            create_commands = [
-                f"git -C '{project.repo_path}' worktree add --force '{merge_worktree}' {merge_target}",
-            ]
-            for command in create_commands:
-                result = self._run_shell_logged(
-                    mission.id,
-                    run_id,
-                    task.key,
-                    "git",
-                    command,
-                    cwd=project.repo_path,
-                )
-                self._ensure_command_success(result.exit_code, task.key, result.summary)
+        release_repo = project.repo_path
+        self._ensure_release_repo_ready(mission.id, run_id, task.key, release_repo, merge_target)
 
         remote = primary_remote(str(project.repo_path))
         if remote:
@@ -458,7 +442,7 @@ class RunnerService:
                 task.key,
                 "git",
                 f"git fetch {remote} --prune",
-                cwd=merge_worktree,
+                cwd=release_repo,
             )
             self._ensure_command_success(fetch.exit_code, task.key, fetch.summary)
             sync_main = self._run_shell_logged(
@@ -467,7 +451,7 @@ class RunnerService:
                 task.key,
                 "git",
                 f"git merge --ff-only {remote}/{merge_target}",
-                cwd=merge_worktree,
+                cwd=release_repo,
             )
             self._ensure_command_success(sync_main.exit_code, task.key, sync_main.summary)
 
@@ -477,7 +461,7 @@ class RunnerService:
             task.key,
             "git",
             f"git merge --no-ff {run.branch_name} -m 'Autopilot merge for mission {mission.id}'",
-            cwd=merge_worktree,
+            cwd=release_repo,
         )
         self._ensure_command_success(merge_commit.exit_code, task.key, merge_commit.summary)
 
@@ -488,7 +472,7 @@ class RunnerService:
                 task.key,
                 "git",
                 f"git push {remote} {merge_target}",
-                cwd=merge_worktree,
+                cwd=release_repo,
             )
             self._ensure_command_success(push.exit_code, task.key, push.summary)
 
@@ -497,7 +481,7 @@ class RunnerService:
             if not distribution or not distribution.app_id or not distribution.testers:
                 raise MissionExecutionError("Android Firebase distribution is configured but appId/testers are missing.")
 
-            install_command = self._release_dependency_install_command(project.package_manager, merge_worktree)
+            install_command = self._release_dependency_install_command(project.package_manager, release_repo)
             if install_command:
                 install = self._run_shell_logged(
                     mission.id,
@@ -505,18 +489,18 @@ class RunnerService:
                     task.key,
                     "deps",
                     install_command,
-                    cwd=merge_worktree,
+                    cwd=release_repo,
                 )
                 self._ensure_command_success(install.exit_code, task.key, install.summary)
 
-            prebuild_command = self._normalize_release_prebuild_command(distribution.prebuild_command, merge_worktree)
+            prebuild_command = self._normalize_release_prebuild_command(distribution.prebuild_command, release_repo)
             prebuild = self._run_shell_logged(
                 mission.id,
                 run_id,
                 task.key,
                 "android-build",
                 prebuild_command,
-                cwd=merge_worktree,
+                cwd=release_repo,
             )
             self._ensure_command_success(prebuild.exit_code, task.key, prebuild.summary)
 
@@ -526,18 +510,18 @@ class RunnerService:
                 task.key,
                 "android-build",
                 distribution.assemble_command,
-                cwd=merge_worktree / "android",
+                cwd=release_repo / "android",
             )
             self._ensure_command_success(assemble.exit_code, task.key, assemble.summary)
 
-            release_notes = self._release_notes_body(merge_worktree / distribution.release_notes_path)
+            release_notes = self._release_notes_body(release_repo / distribution.release_notes_path)
             distribute = self._run_shell_logged(
                 mission.id,
                 run_id,
                 task.key,
                 "firebase",
                 (
-                    f"firebase appdistribution:distribute {self._shell_quote(merge_worktree / distribution.apk_path)} "
+                    f"firebase appdistribution:distribute {self._shell_quote(release_repo / distribution.apk_path)} "
                     f"--app {self._shell_quote(distribution.app_id)} "
                     f"--testers {self._shell_quote(distribution.testers)} "
                     f"--release-notes {self._shell_quote(release_notes)}"
@@ -547,7 +531,7 @@ class RunnerService:
                         else ""
                     )
                 ),
-                cwd=merge_worktree,
+                cwd=release_repo,
             )
             self._ensure_command_success(distribute.exit_code, task.key, distribute.summary)
 
@@ -561,12 +545,12 @@ class RunnerService:
                     metadata={
                         "task_key": task.key,
                         "target": "android-firebase-app-distribution",
-                        "apk_path": str(merge_worktree / distribution.apk_path),
+                        "apk_path": str(release_repo / distribution.apk_path),
                     },
                 ),
             )
 
-        release_note_body = self._release_notes_body(merge_worktree / (distribution.release_notes_path if distribution else "RELEASE_NOTES.md"))
+        release_note_body = self._release_notes_body(release_repo / (distribution.release_notes_path if distribution else "RELEASE_NOTES.md"))
         self._create_artifact(
             mission.id,
             ArtifactPayload(
@@ -1044,6 +1028,47 @@ class RunnerService:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         clipped = " | ".join(line.strip() for line in lines[:24] if line.strip())
         return clipped[:900] or "Autopilot release."
+
+    def _ensure_release_repo_ready(
+        self,
+        mission_id: str,
+        run_id: str,
+        task_key: str,
+        repo_path: Path,
+        merge_target: str,
+    ) -> None:
+        branch = self._run_shell_logged(
+            mission_id,
+            run_id,
+            task_key,
+            "git",
+            "git rev-parse --abbrev-ref HEAD",
+            cwd=repo_path,
+        )
+        self._ensure_command_success(branch.exit_code, task_key, branch.summary)
+        current_branch = branch.summary.strip()
+        if current_branch != merge_target:
+            raise MissionExecutionError(
+                f"Release must run from the original local repo on branch '{merge_target}', "
+                f"but '{repo_path}' is on '{current_branch or 'unknown'}'."
+            )
+
+        status = self._run_shell_logged(
+            mission_id,
+            run_id,
+            task_key,
+            "git",
+            "git status --short",
+            cwd=repo_path,
+        )
+        self._ensure_command_success(status.exit_code, task_key, status.summary)
+        if status.summary.strip():
+            raise MissionExecutionError(
+                "Release must run from the original local repo, but that checkout has pending local changes "
+                "and would not build exactly the merged commit.\n"
+                f"Repo: {repo_path}\n"
+                f"{status.summary.strip()}"
+            )
 
     def _normalize_release_prebuild_command(self, command: str, repo_path: Path) -> str:
         stripped = command.strip()

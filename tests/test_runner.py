@@ -62,6 +62,11 @@ class HybridCommandRunner(LocalCommandRunner):
     def run(self, *, run_key, command, cwd, log_path, env=None):
         if "expo prebuild --platform android --clean --no-install" in command:
             return self._fake(command, cwd, log_path, 0, "expo prebuild ok")
+        if command in {"npm install", "npm ci"}:
+            expo_path = Path(cwd) / "node_modules" / "expo"
+            expo_path.mkdir(parents=True, exist_ok=True)
+            (expo_path / "package.json").write_text('{"name":"expo","version":"54.0.22"}', encoding="utf-8")
+            return self._fake(command, cwd, log_path, 0, "dependencies installed")
         if "./gradlew assembleRelease --no-daemon" in command:
             apk_path = Path(cwd) / "app" / "build" / "outputs" / "apk" / "release" / "app-release.apk"
             apk_path.parent.mkdir(parents=True, exist_ok=True)
