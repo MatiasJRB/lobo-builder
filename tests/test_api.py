@@ -76,9 +76,13 @@ def test_dashboard_home_contains_accessible_shell(tmp_path: Path):
     html = response.text
     assert 'href="#dashboard-main"' in html
     assert 'id="status-live-region"' in html
-    assert 'id="focused-mission"' in html
-    assert 'id="section-nav"' in html
-    assert 'id="queue-list"' in html
+    assert 'id="dashboard-header"' in html
+    assert 'id="mission-queue"' in html
+    assert 'id="mission-workspace"' in html
+    assert 'id="workspace-tabs"' in html
+    assert 'id="workspace-panel-runtime"' in html
+    assert 'id="workspace-panel-logs"' in html
+    assert 'id="workspace-panel-graph"' in html
 
 
 def test_autopilot_mission_exposes_merge_target_and_deploy_targets(tmp_path: Path):

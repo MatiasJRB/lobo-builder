@@ -1,89 +1,192 @@
-# Ciclos de Trabajo Cerrables en lugar de Pipeline Secuencial
+# Work Cycles sobre el runtime adaptativo actual
+
+> Nota de baseline:
+> este plan parte de la versión vigente de Lobo Builder descrita en `docs/architecture.md`
+> y `docs/plans/adaptive-planner-gpt54.md`. Hoy el runtime operativo sigue modelado
+> con `Mission` + `Execution Graph` + `execution_tasks` + `PlanningContext` +
+> expansión `planner-expand-wave-n`. Este documento ya no propone reemplazar ese
+> contrato, sino agregar `work_cycles` como una capa superior de agrupación, cierre
+> y replan.
 
 ## Resumen
 
-- Hacer que el primitivo principal de ejecución pase de `execution_tasks` planificadas de punta a punta a `work_cycles` materializados de forma incremental.
-- Mantener un bootstrap de misión único (`context-map`, `product-spec`, arquitectura global) y mover toda la generación de código a ciclos acotados.
-- Aceptar un número opcional de ciclos por misión; si no viene, el sistema sigue creando ciclos hasta que el cierre de ciclo marque la misión como completa.
-- En `autopilot`, cada ciclo aceptado mergea a `merge_target`; el deploy corre una sola vez, al final del ciclo terminal.
+- El primitivo ejecutable sigue siendo `execution_tasks`.
+- `work_cycles` pasa a ser un contrato aditivo para:
+  - agrupar bootstrap y olas de implementación en unidades cerrables;
+  - dar observabilidad de ciclo, presupuesto y scope residual;
+  - permitir que el `Planner` abra y cierre ciclos sin romper el scheduler actual.
+- El bootstrap de misión sigue siendo global y queda fuera de los ciclos:
+  - `project-shell?`
+  - `context-map`
+  - `product-spec`
+  - `architect-plan`
+- Cada `work_cycle` agrupa una expansión y su cierre:
+  - `planner-expand-wave-n`
+  - `implement-*`
+  - `verify-cycle-n`
+  - `release-cycle-n`
+  - `deploy-cycle-n?`
+  - `cycle-close-n`
+- La tesis cambia de "migrar desde `execution_tasks` a `work_cycles`" a
+  "superponer `work_cycles` sobre el DAG actual para darle estructura de continuidad".
 
-## APIs, Contratos y Tipos Públicos
+## Estado actual que este plan preserva
 
-- Reemplazar `MissionView.execution_tasks` por:
-  - `bootstrap_steps`: pasos globales de misión.
-  - `work_cycles`: lista de ciclos realizados o activos.
-- Agregar a `MissionCreateRequest` y `MissionSpec`:
-  - `target_cycle_count: Optional[int]`
-  - `cycle_budget_mode: "bounded" | "until_complete"`
-- Introducir tipos nuevos:
-  - `WorkCycleSpec`
-  - `CycleStageSpec`
-  - `CycleReviewDecision`
-  - `CycleStatus`
-- Cambiar vistas de runtime para dejar de usar una sola task activa:
-  - `MissionRunView` debe exponer `cycle_key` y `stage_key`.
-  - `CommandExecutionView` debe exponer `cycle_key` y `stage_key` en lugar de sólo `task_key`.
-- Agregar un estado de misión terminal no-exitoso para presupuesto agotado:
-  - `awaiting_replan` cuando `target_cycle_count` se consume y todavía queda scope.
+- `MissionView.execution_tasks` sigue siendo el contrato canónico del DAG operativo.
+- `MissionRunView.current_task_key` y `CommandExecutionView.task_key` siguen siendo
+  la forma principal de ubicar progreso de runtime.
+- El `Planner` hoy:
+  - crea bootstrap global;
+  - materializa `planner-expand-wave-1` cuando `PlanningContext.planning_mode == "adaptive"`;
+  - genera `DecompositionProposal` y `WorkUnit`;
+  - expande `implement-*` a partir de esa propuesta.
+- El `Runner` hoy ejecuta tareas por `depends_on`, persiste artifacts y actualiza el
+  `execution_graph` sin noción nativa de ciclo.
+- El dashboard hoy renderiza board y grafo a nivel task; esa vista se conserva.
 
-## Cambios de Implementación
+## Cambios de implementación propuestos
 
-- Bootstrap de misión:
-  - Mantener `context-map`, `product-spec` y una arquitectura global única como pasos previos a cualquier ciclo.
-  - El artifact `execution_graph` sigue existiendo, pero pasa a representar `bootstrap + cycles + stages`, no una lista plana de tasks.
-- Planeamiento de ciclos:
-  - En creación de misión sólo se materializa `cycle-1`.
-  - Cada ciclo tiene stages fijos: `cycle-plan`, `implement-*`, `verify`, `cycle-review`, `release`, `deploy?`.
-  - `cycle-plan` usa el perfil `architect` para definir un slice acotado y generar sólo los stages de implementación de ese ciclo.
-  - `implement-*` puede seguir teniendo varios stages hermanos por repo/surface, pero ya no se preplanifican todos los cortes de la misión completa.
-  - `cycle-review` produce una decisión estructurada con `mission_complete`, `remaining_scope_summary`, `next_cycle_goal` y `next_cycle_repo_slices`.
-- Progresión y presupuesto:
-  - Si `target_cycle_count` existe, el runner puede crear ciclos nuevos sólo hasta alcanzar ese límite.
-  - Si no existe, el runner sigue creando `cycle-(n+1)` mientras `cycle-review` diga que la misión no terminó.
-  - Si se agota el presupuesto explícito y queda trabajo, la misión pasa a `awaiting_replan` y persiste el residual scope como artifact.
-- Runner y persistencia:
-  - Agregar tablas o records para `work_cycles` y `cycle_stages`.
-  - Vincular runs, commands y artifacts a `cycle_key` y `stage_key`.
-  - Usar branch y worktree frescos por ciclo, siempre recreados desde el `merge_target` ya actualizado.
-  - El loop del runner opera por ciclo: ejecuta stages del ciclo actual, corre release, decide si crear el siguiente ciclo, y continúa automáticamente hasta completar misión o agotar presupuesto.
-  - `interrupt` pausa el stage actual y deja el ciclo reanudable; `resume` retoma el ciclo activo o arranca el próximo ciclo ya materializado.
-- Release y deploy:
-  - `safe`: sigue sin merge ni deploy, pero ahora el release artifact queda asociado al ciclo.
-  - `delivery` y `prod`: mantienen sus gates actuales, aplicados por ciclo.
-  - `autopilot`: merge en cada ciclo aceptado; deploy sólo cuando `cycle-review` marque el ciclo como terminal.
-- Dashboard:
-  - Reemplazar el tablero de tasks por una vista de `bootstrap_steps` + historial de ciclos.
-  - Mostrar `ciclo activo`, `objetivo del ciclo`, `stage activo`, `budget de ciclos` y `scope residual` si existe.
-  - El grafo runtime debe resaltar el ciclo activo y sus stages, no una cadena lineal única.
-- Migración de datos:
-  - Backfill de misiones existentes a:
-    - `bootstrap_steps`: `context-map`, `product-spec`, `architect-plan`.
-    - `work_cycles[0]`: todos los `implement-*`, `verify`, `release` y `deploy` existentes.
-  - Preservar status, artifacts, commands y timestamps ya persistidos.
-  - Misiones legacy sin presupuesto explícito migran con `cycle_budget_mode="until_complete"`.
+### Modelado de `work_cycles`
 
-## Casos de Prueba
+- Introducir `work_cycles` como estructura persistida y observable, sin reemplazar
+  `execution_tasks`.
+- `bootstrap` queda explícitamente fuera de `work_cycles`; representa preparación
+  global de la misión, no un ciclo cerrable.
+- Cada `work_cycle` representa una iteración completa de entrega sobre el DAG actual:
+  - abre con `planner-expand-wave-n`;
+  - ejecuta los `implement-*` que correspondan a ese corte;
+  - corre gates de validación y release del ciclo;
+  - termina con `cycle-close-n`, ownership del `Planner`.
+- `cycle-close-n` es la pieza que decide una de dos salidas:
+  - `mission_complete=true`, con cierre terminal de misión;
+  - `mission_complete=false`, con `remaining_scope_summary` y materialización de
+    `planner-expand-wave-(n+1)`.
 
-- Planner:
-  - misión con `target_cycle_count=3` crea bootstrap + `cycle-1`, no una cadena completa de implementación.
-  - misión sin `target_cycle_count` queda en modo `until_complete`.
-  - `cycle-review` genera el siguiente ciclo con el objetivo y slices declarados.
-- Runner:
-  - progresión automática `cycle-1 -> cycle-2 -> ...` mientras no se complete la misión.
-  - `autopilot` mergea en cada ciclo y deploya sólo en el ciclo final.
-  - agotamiento de presupuesto con trabajo restante termina en `awaiting_replan`.
-  - `interrupt` y `resume` funcionan dentro de un stage y entre ciclos.
-- API y dashboard:
-  - `POST /api/missions` devuelve `bootstrap_steps` y `work_cycles`.
-  - `/api/dashboard` muestra ciclo y stage activos.
-  - `/api/missions/{id}/runs` refleja `cycle_key` y `stage_key`.
-- Migración:
-  - una misión legacy con `execution_tasks` se convierte en bootstrap + `cycle-1` sin perder artifacts ni logs.
+### Planner-led flow
 
-## Supuestos y Defaults
+- Se mantiene la regla central del sistema: sólo el `Planner` puede abrir, cerrar y
+  replanificar ciclos.
+- `architect-plan` sigue siendo bootstrap global. No pasa a ser un stage interno de
+  cada ciclo.
+- El `Planner` usa como insumos reales del runtime actual:
+  - `PlanningContext`
+  - `DecompositionProposal`
+  - `WorkUnit`
+  - artifact `planning_context`
+  - artifact `decomposition_proposal`
+  - artifact `execution_graph`
+- La expansión sigue siendo lazy:
+  - en misiones fast-path puede existir sólo `cycle-1`;
+  - en misiones adaptativas el siguiente ciclo nace recién desde `cycle-close-n`.
 
-- La migración es directa: no se mantiene compatibilidad transitoria con `execution_tasks`.
-- El runner sigue siendo single-worker en este slice; el cambio es de unidad de planeamiento y cierre, no de paralelismo real del runtime.
-- El primer ciclo de greenfield toma `first_cycle_goal` como objetivo inicial cuando esté disponible.
-- La creación de ciclos futuros es lazy: sólo se materializan cuando el ciclo previo cierra y corresponde seguir.
-- Si un ciclo mergeó correctamente, el siguiente siempre nace desde la rama principal ya integrada.
+### Runner y scheduler
+
+- El scheduler actual por `execution_tasks` y `depends_on` se mantiene.
+- `work_cycles` no cambia la unidad ejecutable del runner; agrega agrupación y reglas
+  de cierre encima del DAG.
+- `MissionRunView.current_task_key` sigue apuntando a una task concreta, no a un ciclo.
+- La integración propuesta es:
+  - `planner-expand-wave-n` sigue materializando `implement-*` concretos;
+  - `verify-cycle-n`, `release-cycle-n` y `deploy-cycle-n?` se modelan como tasks
+    reales del DAG y quedan asociadas a `cycle_key`;
+  - `cycle-close-n` evalúa artifacts, estado de verify/release y residual scope;
+  - si la misión continúa, el runner encola la siguiente expansión sin resetear el
+    runtime base.
+
+### Policy gates por ciclo
+
+- `safe`:
+  - cierra cada ciclo sin merge ni deploy;
+  - el cierre deja artifacts y residual scope asociados al ciclo.
+- `delivery` y `prod`:
+  - mantienen sus gates actuales;
+  - esos gates pasan a registrarse por ciclo en lugar de quedar implícitos sólo a
+    nivel misión.
+- `autopilot`:
+  - puede mergear al `merge_target` en cada ciclo aceptado;
+  - sólo deploya cuando `cycle-close-n` marque el ciclo terminal de la misión.
+
+### Dashboard y observabilidad
+
+- Se conserva la vista task-level actual como fuente principal de progreso.
+- Se agrega agrupación visual por:
+  - `bootstrap`
+  - `cycle-1`
+  - `cycle-2`
+  - `cycle-n`
+- La UI propuesta debe mostrar:
+  - `active_cycle_key`
+  - objetivo o resumen del ciclo
+  - scope residual del último cierre
+  - estado del gate del ciclo
+- El board actual no se reemplaza; se enriquece con headers, filtros o badges de
+  ciclo sobre `execution_tasks`.
+
+## APIs, contratos públicos y persistencia
+
+### Contratos canónicos que se preservan
+
+- `MissionView.execution_tasks`
+- `MissionRunView.current_task_key`
+- `CommandExecutionView.task_key`
+
+### Extensiones aditivas propuestas
+
+- `MissionView.work_cycles?`
+- `MissionView.active_cycle_key?`
+- `ExecutionTaskSpec.cycle_key?`
+- `MissionRunView.current_cycle_key?`
+- `CommandExecutionView.cycle_key?`
+- `ArtifactPayload.metadata.cycle_key?`
+
+### Regla de compatibilidad
+
+- Ninguna API existente deja de exponer `execution_tasks`.
+- Ningún endpoint actual se rompe por introducir `work_cycles`.
+- La lectura principal del runtime puede seguir siendo task-level aunque exista
+  metadata adicional de ciclo.
+
+### Persistencia y migración
+
+- La migración debe ser aditiva, no destructiva.
+- Agregar estructura persistida para `work_cycles`.
+- Agregar `cycle_key` en:
+  - tasks
+  - runs
+  - commands
+  - artifacts
+- Backfill de misiones existentes:
+  - `bootstrap`: `project-shell?`, `context-map`, `product-spec`, `architect-plan`
+  - `cycle-1`: `planner-expand-wave-*`, `implement-*`, `verify`, `release`, `deploy`
+- El documento elimina cualquier premisa de migración directa que quite
+  `execution_tasks` del contrato.
+
+## Escenarios y casos de prueba
+
+- Misión fast-path single-repo:
+  - sigue funcionando sólo con `execution_tasks`;
+  - `cycle-1` agrupa verify, release y deploy sin cambiar el scheduler base.
+- Misión adaptativa:
+  - `planner-expand-wave-1` abre `cycle-1`;
+  - `cycle-close-1` decide si se materializa `planner-expand-wave-2`.
+- Misión greenfield:
+  - `project-shell` permanece en bootstrap;
+  - el ciclo de implementación empieza después del bootstrap global.
+- Misión `autopilot`:
+  - merge por ciclo aceptado;
+  - deploy sólo cuando el cierre del ciclo declare misión terminada.
+- Compatibilidad API/dashboard:
+  - el documento debe seguir siendo consistente con `MissionView.execution_tasks`,
+    `MissionRunView.current_task_key` y `CommandExecutionView.task_key`;
+  - cualquier campo de ciclo nuevo debe quedar marcado como propuesta futura y
+    extensión aditiva.
+
+## Supuestos y defaults
+
+- `work_cycles` es una capa aditiva sobre el runtime actual.
+- El bootstrap sigue fuera de los ciclos.
+- El `Planner` conserva control total del DAG y de la apertura/cierre de ciclos.
+- El alcance de este documento es sólo este plan; no reescribe el resto de `docs/`.
+- Cuando el texto use nombres como `verify-cycle-n`, `release-cycle-n`,
+  `deploy-cycle-n` o `cycle-close-n`, debe leerse como propuesta de evolución
+  compatible con el scheduler actual, no como descripción del runtime ya implementado.

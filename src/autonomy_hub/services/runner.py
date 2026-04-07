@@ -715,30 +715,6 @@ class RunnerService:
             ),
         )
 
-    def _create_safe_release_gate_artifact(
-        self,
-        *,
-        mission: MissionView,
-        task: ExecutionTaskSpec,
-        project: ResolvedProjectContext,
-        run: MissionRunView,
-        reason: str,
-    ) -> None:
-        self._create_artifact(
-            mission.id,
-            ArtifactPayload(
-                kind="pull_request",
-                title="Safe Policy Release Gate",
-                body=(
-                    f"Mission policy '{mission.policy.slug}' keeps merge and deploy disabled.\n"
-                    f"Branch '{run.branch_name}' remains isolated in worktree '{run.worktree_path}'.\n"
-                    f"{reason}"
-                ),
-                repo_scope=[project.repository],
-                metadata={"task_key": task.key, "policy": mission.policy.slug, "branch_name": run.branch_name},
-            ),
-        )
-
         review_request = self._request_copilot_review(
             release_repo=release_repo,
             repository=pr["repository"],
@@ -762,6 +738,30 @@ class RunnerService:
                     "status": review_request["status"],
                     "reviewer": review_request["reviewer"],
                 },
+            ),
+        )
+
+    def _create_safe_release_gate_artifact(
+        self,
+        *,
+        mission: MissionView,
+        task: ExecutionTaskSpec,
+        project: ResolvedProjectContext,
+        run: MissionRunView,
+        reason: str,
+    ) -> None:
+        self._create_artifact(
+            mission.id,
+            ArtifactPayload(
+                kind="pull_request",
+                title="Safe Policy Release Gate",
+                body=(
+                    f"Mission policy '{mission.policy.slug}' keeps merge and deploy disabled.\n"
+                    f"Branch '{run.branch_name}' remains isolated in worktree '{run.worktree_path}'.\n"
+                    f"{reason}"
+                ),
+                repo_scope=[project.repository],
+                metadata={"task_key": task.key, "policy": mission.policy.slug, "branch_name": run.branch_name},
             ),
         )
 

@@ -3,100 +3,50 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f3efe7" />
     <title>Autonomy Hub Dashboard</title>
     <link rel="stylesheet" href="/static/styles.css" />
-    <script src="/static/dashboard.js" defer></script>
+    <script type="module" src="/static/dashboard.js"></script>
   </head>
   <body>
-    <a class="skip-link" href="#dashboard-main">Saltar al dashboard operativo</a>
+    <a class="skip-link" href="#dashboard-main">Saltar al workspace operativo</a>
 
-    <main id="dashboard-main" class="page-shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Dashboard operativo del planner</p>
-          <h1>Misiones, runtime y contexto en una sola vista local.</h1>
-          <p class="lede">
-            Seguís la misión activa, cambiás de foco sin perder el polling y ves qué puede correr,
-            qué se bloqueó y qué cambió en el worktree sin salir del runtime planner-led.
-          </p>
-        </div>
-        <div class="hero-card hero-stats" aria-label="Resumen del dashboard">
-          <div class="metric">
-            <span>Misiones</span>
-            <strong id="metric-missions">0</strong>
-          </div>
-          <div class="metric">
-            <span>Repos en foco</span>
-            <strong id="metric-repositories">0</strong>
-          </div>
-          <div class="metric">
-            <span>Nodos del contexto</span>
-            <strong id="metric-nodes">0</strong>
-          </div>
-        </div>
-      </header>
-
-      <section class="action-bar" aria-label="Acciones principales del dashboard">
-        <div class="action-group">
-          <button id="seed-demo">Crear Misión Demo</button>
-          <button id="discover-local" class="secondary">Descubrir Repos Locales</button>
-          <button id="refresh-dashboard" class="ghost">Actualizar Ahora</button>
-        </div>
-        <div class="action-meta">
-          <p id="refresh-status" class="card-kicker">Sincronización inicial pendiente.</p>
-          <code translate="no">POST /api/missions</code>
-        </div>
-      </section>
-
-      <section id="status-banner" class="status-banner" hidden aria-live="off"></section>
+    <main id="dashboard-main" class="dashboard-page">
+      <section id="status-banner" class="status-banner" hidden></section>
       <p id="status-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></p>
-      <section class="mission-pulse-shell" aria-live="off">
-        <div id="mission-pulse"></div>
-      </section>
 
-      <section class="dashboard-grid">
-        <article class="panel panel-wide" aria-labelledby="focused-mission-title">
-          <div class="panel-header panel-header-top">
-            <div>
-              <p class="eyebrow">Misión enfocada</p>
-              <h2 id="focused-mission-title">Estado actual y acciones primarias</h2>
-            </div>
-            <nav id="section-nav" class="section-nav" aria-label="Ir a panel secundario"></nav>
-          </div>
-          <p class="panel-note">
-            La misión seleccionada manda: acá ves el owner activo, el task actual, el worktree y
-            las acciones operativas principales.
-          </p>
-          <div id="focused-mission" class="stack" aria-live="off"></div>
-        </article>
+      <div class="dashboard-shell">
+        <aside class="mission-rail" aria-labelledby="mission-queue-title">
+          <div id="mission-queue"></div>
+        </aside>
 
-        <article class="panel" aria-labelledby="queue-title">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Selector</p>
-              <h2 id="queue-title">Misiones disponibles</h2>
-            </div>
-          </div>
-          <p class="panel-note">
-            Cambiá de foco sin perder el polling. La selección queda persistida en la URL.
-          </p>
-          <div id="queue-list" class="stack" aria-live="off"></div>
-        </article>
+        <section id="mission-workspace" class="mission-workspace" aria-labelledby="workspace-heading">
+          <header id="dashboard-header" class="workspace-header"></header>
 
-        <article class="panel panel-secondary" aria-labelledby="section-panel-title">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Panel activo</p>
-              <h2 id="section-panel-title">Runtime, logs o grafo según el foco</h2>
-            </div>
+          <div class="workspace-frame">
+            <nav id="workspace-tabs" class="workspace-tabs" aria-label="Secciones del workspace"></nav>
+
+            <section
+              id="workspace-panel-runtime"
+              class="workspace-panel"
+              role="tabpanel"
+              aria-labelledby="workspace-tab-runtime"
+            ></section>
+            <section
+              id="workspace-panel-logs"
+              class="workspace-panel"
+              role="tabpanel"
+              aria-labelledby="workspace-tab-logs"
+            ></section>
+            <section
+              id="workspace-panel-graph"
+              class="workspace-panel"
+              role="tabpanel"
+              aria-labelledby="workspace-tab-graph"
+            ></section>
           </div>
-          <p class="panel-note">
-            El panel secundario mantiene el foco operativo: usá la navegación para abrir runtime,
-            revisar logs recientes o bajar al contexto del grafo.
-          </p>
-          <div id="section-content" class="stack" aria-live="off"></div>
-        </article>
-      </section>
+        </section>
+      </div>
     </main>
   </body>
 </html>
